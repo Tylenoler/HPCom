@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hcom/main.dart';
+import 'package:hcom/models/frame_protocol.dart';
 import 'package:hcom/models/log_copy.dart';
 import 'package:hcom/models/log_export.dart';
 import 'package:hcom/models/receive_framer.dart';
 import 'package:hcom/models/serial_entry.dart';
 import 'package:hcom/models/time_zone.dart';
+import 'package:hcom/screens/workbench_screen.dart';
 import 'package:hcom/theme/hcom_theme.dart';
 
 void main() {
@@ -15,18 +17,171 @@ void main() {
 
     expect(find.text('HCOM 调试助手'), findsOneWidget);
     expect(find.text('HEX 原始'), findsOneWidget);
+    expect(find.text('统计'), findsNothing);
+    expect(find.text('时间轴'), findsNothing);
     expect(find.text('发送面板'), findsOneWidget);
+    expect(find.text('浮动面板'), findsNothing);
     expect(find.text('清除日志'), findsOneWidget);
     expect(find.text('显示行号'), findsOneWidget);
     expect(find.text('手动保存'), findsOneWidget);
-    expect(find.text('实时保存'), findsOneWidget);
-    expect(find.text('可拖选复制'), findsOneWidget);
+    expect(find.text('实时保存 · 已关闭'), findsOneWidget);
+    expect(find.textContaining('实时数据'), findsNothing);
     expect(find.byType(SelectionArea), findsOneWidget);
     expect(find.text('周期'), findsOneWidget);
     expect(find.byIcon(Icons.timer), findsOneWidget);
     expect(find.byIcon(Icons.chevron_left), findsOneWidget);
     expect(find.byIcon(Icons.chevron_right), findsOneWidget);
     expect(find.byKey(const ValueKey('queue-editor-panel')), findsNothing);
+  });
+
+  testWidgets('reflows bottom metrics and build identity on a narrow window',
+      (tester) async {
+    tester.view.physicalSize = const Size(480, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const HcomApp());
+    await tester.pumpAndSettle();
+
+    final statusBar = find.byKey(const ValueKey('status-bar'));
+    expect(statusBar, findsOneWidget);
+    expect(tester.getSize(statusBar).height, greaterThan(30));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('mutes but does not disable the hide-line-numbers action',
+      (tester) async {
+    await tester.pumpWidget(const HcomApp());
+
+    await tester.tap(find.text('显示行号'));
+    await tester.pumpAndSettle();
+
+    final buttonFinder = find.ancestor(
+      of: find.text('隐藏行号'),
+      matching: find.byType(FilledButton),
+    );
+    final button = tester.widget<FilledButton>(buttonFinder.first);
+    final scheme = Theme.of(tester.element(find.text('隐藏行号'))).colorScheme;
+    expect(button.style!.backgroundColor!.resolve({}),
+        scheme.onSurface.withValues(alpha: .12));
+    expect(button.onPressed, isNotNull);
+
+    await tester.tap(find.text('隐藏行号'));
+    await tester.pumpAndSettle();
+    expect(find.text('显示行号'), findsOneWidget);
+  });
+
+  testWidgets('opens the about page from settings', (tester) async {
+    await tester.pumpWidget(const HcomApp());
+
+    await tester.tap(find.byTooltip('设置'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('关于 HCOM'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('关于 HCOM'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('HCOM 串口调试助手'), findsOneWidget);
+    expect(find.text('版本 0.3.2'), findsAtLeastNWidgets(1));
+    expect(find.text('Tylenoler'), findsOneWidget);
+    expect(find.text('github.com/Tylenoler/HCOM'), findsOneWidget);
+    expect(find.text('© 2026 Tylenoler'), findsOneWidget);
+    expect(find.text('开发构建'), findsOneWidget);
+    expect(find.text('未打包'), findsOneWidget);
+  });
+
+  testWidgets('calculates and returns a complete integrity frame',
+      (tester) async {
+    String? returnedFrame;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: IntegrityCalculatorPage(
+          onSendToMain: (frame) => returnedFrame = frame,
+        ),
+      ),
+    ));
+
+    await tester.enterText(find.byKey(const ValueKey('crc-calculator-input')),
+        '31 32 33 34 35 36 37 38 39');
+    await tester.pumpAndSettle();
+    expect(find.text('校验值'), findsOneWidget);
+    expect(find.text('37 4B（小端）'), findsOneWidget);
+    expect(find.text('完整帧'), findsOneWidget);
+    expect(find.text('31 32 33 34 35 36 37 38 39 37 4B'), findsOneWidget);
+
+    await tester.tap(find.text('填入主发送框'));
+    await tester.pumpAndSettle();
+    expect(returnedFrame, '31 32 33 34 35 36 37 38 39 37 4B');
+  });
+
+  testWidgets('keeps the floating integrity panel state after minimizing',
+      (tester) async {
+    await tester.pumpWidget(const HcomApp());
+
+    await tester.tap(find.byTooltip('打开校验模块'));
+    await tester.pumpAndSettle();
+    expect(find.text('校验模块'), findsOneWidget);
+
+    const source = '31 32 33 34 35 36 37 38 39';
+    const frame = '$source 37 4B';
+    await tester.enterText(
+        find.byKey(const ValueKey('crc-calculator-input')), source);
+    await tester.pumpAndSettle();
+    expect(find.text(frame), findsOneWidget);
+
+    await tester.tap(find.byTooltip('缩小校验面板'));
+    await tester.pumpAndSettle();
+    expect(find.text('校验模块'), findsNothing);
+
+    await tester.tap(find.byTooltip('打开校验模块'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<TextField>(
+            find.byKey(const ValueKey('crc-calculator-input')),
+          )
+          .controller!
+          .text,
+      source,
+    );
+    expect(find.text(frame), findsOneWidget);
+
+    await tester.ensureVisible(find.text('填入主发送框'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('填入主发送框'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('main-send-input')))
+          .controller!
+          .text,
+      frame,
+    );
+  });
+
+  testWidgets('keeps the floating integrity panel inside the main window',
+      (tester) async {
+    tester.view.physicalSize = const Size(1280, 820);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(const HcomApp());
+
+    await tester.tap(find.byTooltip('打开校验模块'));
+    await tester.pumpAndSettle();
+    final panel = find.byKey(const ValueKey('integrity-calculator-window'));
+
+    await tester.drag(find.text('校验模块'), const Offset(-2000, -2000));
+    await tester.pumpAndSettle();
+    expect(tester.getTopLeft(panel).dx, greaterThanOrEqualTo(12));
+    expect(tester.getTopLeft(panel).dy, greaterThanOrEqualTo(12));
+
+    await tester.drag(find.text('校验模块'), const Offset(4000, 4000));
+    await tester.pumpAndSettle();
+    final bounds = tester.getRect(panel);
+    expect(bounds.right, lessThanOrEqualTo(1280 - 12));
+    expect(bounds.bottom, lessThanOrEqualTo(820 - 12));
   });
 
   testWidgets('updates the selected baud rate while disconnected',
@@ -46,7 +201,7 @@ void main() {
       (tester) async {
     await tester.pumpWidget(const HcomApp());
 
-    await tester.tap(find.byTooltip('收起串口配置'));
+    await tester.tap(find.byTooltip('收起串口配置').last);
     await tester.pumpAndSettle();
     expect(find.byTooltip('展开串口配置'), findsOneWidget);
 
@@ -163,7 +318,7 @@ void main() {
     await tester.tap(find.text('普通'));
     await tester.pumpAndSettle();
     expect(find.text('HEX 原始'), findsOneWidget);
-    expect(find.text('HEX 实时数据'), findsOneWidget);
+    expect(find.textContaining('实时数据'), findsNothing);
     expect(find.text('输入普通文本，将以 UTF-8 编码发送'), findsOneWidget);
 
     await tester.tap(find.text('HEX'));
@@ -177,13 +332,13 @@ void main() {
     await tester.tap(find.text('HEX'));
     await tester.pumpAndSettle();
     expect(find.text('HEX 原始'), findsOneWidget);
-    expect(find.text('HEX 实时数据'), findsOneWidget);
+    expect(find.textContaining('实时数据'), findsNothing);
 
-    // Choosing a receive format directly makes it independent again.
-    await tester.tap(find.text('HEX 原始'));
+    // Choosing the receive text page directly makes it independent again.
+    await tester.tap(find.text('文本 原始'));
     await tester.pumpAndSettle();
     expect(find.text('文本 原始'), findsOneWidget);
-    expect(find.text('文本 实时数据'), findsOneWidget);
+    expect(find.textContaining('实时数据'), findsNothing);
 
     await tester.tap(find.text('HEX'));
     await tester.pumpAndSettle();
@@ -258,6 +413,8 @@ void main() {
     expect(find.text('左侧 Dock'), findsOneWidget);
     expect(find.text('右侧 Dock'), findsOneWidget);
     expect(find.text('队列编辑面板'), findsOneWidget);
+    expect(find.text('实时保存'), findsOneWidget);
+    expect(find.text('启动时默认关闭'), findsOneWidget);
 
     await tester.tap(find.text('修改时区'));
     await tester.pumpAndSettle();
@@ -266,13 +423,16 @@ void main() {
   });
 
   testWidgets('uses rounded hover states for menu options', (tester) async {
+    tester.view.physicalSize = const Size(1920, 1080);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const HcomApp());
 
     await tester.tap(find.text('分包 · 自动识别'));
     await tester.pumpAndSettle();
-    final field = find.text('自动识别');
     final anchor = tester.widget<MenuAnchor>(
-      find.ancestor(of: field, matching: find.byType(MenuAnchor)).first,
+      find.byType(MenuAnchor).first,
     );
     final surfaceShape = anchor.style!.shape!.resolve({});
     expect(surfaceShape, isA<RoundedRectangleBorder>());
@@ -281,8 +441,6 @@ void main() {
       BorderRadius.circular(16),
     );
 
-    await tester.tap(field);
-    await tester.pumpAndSettle();
     final menuItem =
         tester.widget<MenuItemButton>(find.byType(MenuItemButton).first);
     final itemShape = menuItem.style!.shape!.resolve({WidgetState.hovered});
@@ -291,6 +449,59 @@ void main() {
       (itemShape! as RoundedRectangleBorder).borderRadius,
       BorderRadius.circular(10),
     );
+
+    await tester.tap(find.text('固定长度'));
+    await tester.pumpAndSettle();
+    expect(find.text('分包 · 固定长度'), findsOneWidget);
+    expect(find.text('接收分包'), findsNothing);
+  });
+
+  testWidgets('offers an explicit off option for realtime saving',
+      (tester) async {
+    tester.view.physicalSize = const Size(1920, 1080);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(const HcomApp());
+
+    final buttonFinder = find.ancestor(
+      of: find.text('实时保存 · 已关闭'),
+      matching: find.byType(FilledButton),
+    );
+    final button = tester.widget<FilledButton>(buttonFinder.first);
+    final scheme =
+        Theme.of(tester.element(find.text('实时保存 · 已关闭'))).colorScheme;
+    expect(button.style!.backgroundColor!.resolve({}),
+        scheme.onSurface.withValues(alpha: .12));
+    expect(button.onPressed, isNotNull);
+
+    await tester.tap(find.text('实时保存 · 已关闭'));
+    await tester.pumpAndSettle();
+    expect(find.text('关闭实时保存'), findsOneWidget);
+    expect(find.text('实时保存 CSV'), findsOneWidget);
+    expect(find.text('实时保存 TXT'), findsOneWidget);
+  });
+
+  testWidgets('shows the Phase 3 structured field view and template editor',
+      (tester) async {
+    tester.view.physicalSize = const Size(1920, 1080);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(const HcomApp());
+
+    expect(find.byKey(const ValueKey('field-stream')), findsNothing);
+    await tester.tap(find.byTooltip('打开字段模块'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('field-stream')), findsOneWidget);
+    expect(find.text('默认 UART 帧'), findsOneWidget);
+    expect(find.text('编辑模板'), findsOneWidget);
+
+    await tester.tap(find.text('编辑模板'));
+    await tester.pumpAndSettle();
+    expect(find.text('帧定义器'), findsOneWidget);
+    expect(find.text('实时预览 HEX'), findsOneWidget);
+    expect(find.text('添加字段'), findsOneWidget);
   });
 
   test('defaults log timestamps to China Standard Time', () {
@@ -391,5 +602,44 @@ void main() {
     final frames = framer.addHex('20 0D 0A 7E 01 30 0D 0A', time);
     expect(frames.map((frame) => frame.hex),
         ['7E 01 10 20 0D 0A', '7E 01 30 0D 0A']);
+  });
+
+  test('parses a length-delimited frame and validates SUM-8', () {
+    final parser = ProtocolFrameParser(FrameTemplate.standard());
+
+    final parsed = parser.parseHex('AA 55 03 10 20 30 62 0D');
+
+    expect(parsed.valid, isTrue);
+    expect(parsed.fields.map((field) => field.field.name),
+        ['帧头', '长度', '数据域', '和校验', '帧尾']);
+    expect(parsed.fields[2].hex, '10 20 30');
+  });
+
+  test('reports checksum and fixed delimiter failures explicitly', () {
+    final parser = ProtocolFrameParser(FrameTemplate.standard());
+
+    expect(parser.parseHex('AA 55 01 10 11 0D').valid, isFalse);
+    expect(parser.parseHex('AB 55 00 FF 0D').error, contains('帧头 不匹配'));
+  });
+
+  test('calculates standard check values for the common CRC algorithms', () {
+    final bytes = '123456789'.codeUnits;
+
+    expect(CrcAlgorithm.crc8.calculate(bytes), 0xF4);
+    expect(CrcAlgorithm.crc8Maxim.calculate(bytes), 0xA1);
+    expect(CrcAlgorithm.crc16Ibm.calculate(bytes), 0xBB3D);
+    expect(CrcAlgorithm.crc16Modbus.calculate(bytes), 0x4B37);
+    expect(CrcAlgorithm.crc16CcittFalse.calculate(bytes), 0x29B1);
+    expect(CrcAlgorithm.crc16X25.calculate(bytes), 0x906E);
+    expect(CrcAlgorithm.crc32IsoHdlc.calculate(bytes), 0xCBF43926);
+  });
+
+  test('round-trips a frame template through its portable JSON format', () {
+    final original = FrameTemplate.standard();
+    final decoded = FrameTemplate.decode(original.encode());
+
+    expect(decoded.name, original.name);
+    expect(decoded.fields.length, original.fields.length);
+    expect(decoded.fields.last.kind, ProtocolFieldKind.trailer);
   });
 }

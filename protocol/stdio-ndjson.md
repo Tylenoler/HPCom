@@ -22,7 +22,7 @@ Phase 2 implements the Windows UART core behind the Phase 1 process boundary. Fl
 ## Events: Rust → Flutter
 
 ```json
-{"event":"ready","payload":{"protocolVersion":1,"coreVersion":"0.1.0"}}
+{"event":"ready","payload":{"protocolVersion":1,"coreVersion":"0.2.0"}}
 {"event":"pong","payload":{}}
 {"event":"ports","payload":{"ports":[{"port":"COM3","description":"USB Serial Device","hardwareId":"USB\\VID_1A86&PID_7523","kind":"usb"}]}}
 {"event":"serial_data","payload":{"direction":"rx","timestamp":"2026-09-10T12:00:00.000Z","bytes":"AA 55"}}

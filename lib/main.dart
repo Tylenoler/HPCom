@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/workbench_screen.dart';
 import 'theme/hcom_theme.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const HcomApp());
 
