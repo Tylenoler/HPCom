@@ -99,5 +99,5 @@ Phase 1 的可运行基座已经完成：Windows Flutter 桌面壳、Material 3 
 ## 仓库状态
 
 - 默认分支：`main`
-- 当前提交已推送至：<https://github.com/Tylenoler/HCOM>
+- 当前提交已推送至：<https://github.com/Tylenoler/HPCom>
 - 构建目录、IDE 配置、缓存、日志与 Rust `target` 已由 `.gitignore` 排除，不纳入版本库。

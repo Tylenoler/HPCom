@@ -1,5 +1,5 @@
 name: hcom
-description: HPCOM UART debugging assistant for Windows.
+description: HPCom UART debugging assistant for Windows.
 publish_to: none
 version: 1.0.0+1
 

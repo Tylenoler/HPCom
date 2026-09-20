@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Apache-2.0 license (`LICENSE`).
+
+### Fixed
+
+- Updated repository links and the in-app About entry to the renamed `HPCom` repository.
+
 ## [1.0.0] - 2026-09-20
 
 ### Changed
@@ -65,10 +73,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Windows UART/COM workbench, connection workflow, send queue, receive framing, and logging.
 
-[Unreleased]: https://github.com/Tylenoler/HCOM/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/Tylenoler/HCOM/compare/v0.4.0...v1.0.0
-[0.4.0]: https://github.com/Tylenoler/HCOM/compare/v0.3.2...v0.4.0
-[0.3.2]: https://github.com/Tylenoler/HCOM/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/Tylenoler/HCOM/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/Tylenoler/HCOM/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/Tylenoler/HCOM/releases/tag/v0.2.0
+[Unreleased]: https://github.com/Tylenoler/HPCom/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Tylenoler/HPCom/compare/v0.4.0...v1.0.0
+[0.4.0]: https://github.com/Tylenoler/HPCom/compare/v0.3.2...v0.4.0
+[0.3.2]: https://github.com/Tylenoler/HPCom/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/Tylenoler/HPCom/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/Tylenoler/HPCom/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Tylenoler/HPCom/releases/tag/v0.2.0

@@ -3710,7 +3710,7 @@ class _AboutHpcommDialog extends StatelessWidget {
                               _AboutDetail(label: '开发者', value: 'Tylenoler'),
                               _AboutDetail(
                                 label: '开源仓库',
-                                value: 'github.com/Tylenoler/HCOM',
+                                value: 'github.com/Tylenoler/HPCom',
                               ),
                               _AboutDetail(
                                 label: '著作权',

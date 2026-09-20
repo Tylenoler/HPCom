@@ -24,6 +24,9 @@ driver/hcom-vcom/dist/signed/
 *.log
 captures/
 tool/perftest/reports/
+
+# 本地压力测试草稿与报告：保留在本机，不入公开仓库
+tool/stresstest/
 dist/
 # Widget Preview related
 .widget_preview/

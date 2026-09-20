@@ -1,4 +1,4 @@
-# HPCom / HPCom 串口调试助手
+# HPCom / 串口调试助手
 
 <p align="center">
   <img src="Image/HPCOMLOGO.png" width="160" alt="HPCom logo" />
@@ -50,12 +50,12 @@ The receive workspace can switch between HEX and text, show line numbers, and ap
 
 ## Download / 下载
 
-1. Open the [v1.0.0 release](https://github.com/Tylenoler/HCOM/releases/tag/v1.0.0).
+1. Open the [v1.0.0 release](https://github.com/Tylenoler/HPCom/releases/tag/v1.0.0).
 2. Download and extract the Windows x64 release archive.
 3. Keep every extracted file and folder together; `HPCom.exe`, `hcom-core.exe`, `data/`, and the bundled DLL files are one application package.
 4. Run `HPCom.exe`.
 
-1. 打开 [v1.0.0 发布页](https://github.com/Tylenoler/HCOM/releases/tag/v1.0.0)。
+1. 打开 [v1.0.0 发布页](https://github.com/Tylenoler/HPCom/releases/tag/v1.0.0)。
 2. 下载并解压 Windows x64 发布包。
 3. 请保持所有解压后的文件和文件夹在同一目录；`HPCom.exe`、`hcom-core.exe`、`data/` 与随附 DLL 共同组成完整程序。
 4. 运行 `HPCom.exe`。
@@ -93,7 +93,7 @@ Use the manual-save or real-time-save actions in the receive toolbar when a trac
 
 ### 5. Advanced monitor mode / 高级旁路监听模式
 
-The source tree contains virtual-COM relay work. A complete end-user monitor-mode package requires an HCOM Windows kernel-policy-trusted virtual-COM driver. That signed driver package is **not included in v1.0.0**, so this release should be used with physical COM ports. 源码中包含虚拟 COM 转发相关工作。完整的用户旁路监听包需要通过 Windows 内核策略验证的 HCOM 虚拟串口驱动；该签名驱动 **未包含在 v1.0.0**，因此本版请使用物理 COM 口。
+The source tree contains virtual-COM relay work. A complete end-user monitor-mode package requires the HCOM VCOM virtual-COM driver (`driver/hcom-vcom/`) approved through Windows kernel signing. That signed driver package is **not included in v1.0.0**, so this release should be used with physical COM ports. 源码中包含虚拟 COM 转发相关工作。完整的用户旁路监听包需要通过 Windows 内核签名审核的 HCOM VCOM 虚拟串口驱动（源码见 `driver/hcom-vcom/`）；该签名驱动 **未包含在 v1.0.0**，因此本版请使用物理 COM 口。
 
 ## Requirements / 系统要求
 
@@ -106,8 +106,8 @@ The source tree contains virtual-COM relay work. A complete end-user monitor-mod
 The checked-in sources are intended for Windows development. You need Flutter stable with Windows desktop support and Rust stable. 本仓库源码面向 Windows 开发；需要安装启用了 Windows desktop support 的 Flutter stable 与 Rust stable。
 
 ```powershell
-git clone https://github.com/Tylenoler/HCOM.git
-cd HCOM
+git clone https://github.com/Tylenoler/HPCom.git
+cd HPCom
 .\scripts\bootstrap.ps1 -Build
 ```
 
@@ -137,6 +137,11 @@ For v1.0.0, the Windows Release package was rebuilt from a clean Flutter build a
 This verification does **not** replace acceptance on every USB-UART adapter, device protocol, long-duration soak scenario, or the unavailable signed virtual-COM driver workflow. 本验证 **不等同于** 覆盖所有 USB 转串口适配器、设备协议、长时间稳定性场景，或尚未提供的签名虚拟 COM 驱动流程。
 
 See [CHANGELOG.md](CHANGELOG.md) for version history. 版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+## License / 许可证
+
+Licensed under the Apache License 2.0 — see [LICENSE](LICENSE).
+本项目采用 Apache License 2.0，详见 [LICENSE](LICENSE)。
 
 ## Contributing / 贡献
 

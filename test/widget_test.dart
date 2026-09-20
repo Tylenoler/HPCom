@@ -90,7 +90,7 @@ void main() {
     expect(find.text('HPCom 串口调试助手'), findsOneWidget);
     expect(find.text('版本 1.0.0'), findsAtLeastNWidgets(1));
     expect(find.text('Tylenoler'), findsOneWidget);
-    expect(find.text('github.com/Tylenoler/HCOM'), findsOneWidget);
+    expect(find.text('github.com/Tylenoler/HPCom'), findsOneWidget);
     expect(find.text('© 2026 Tylenoler'), findsOneWidget);
     expect(find.text('开发构建'), findsOneWidget);
     expect(find.text('未打包'), findsOneWidget);
