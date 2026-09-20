@@ -1,13 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../app_info.dart';
@@ -45,6 +43,24 @@ extension PacketSuffixDetails on PacketSuffix {
 const _queueDeleteDoubleClickWindow = Duration(milliseconds: 450);
 const _minimumAppWidthForQueueEditor = 600.0;
 const _sendFormatSyncWindow = Duration(milliseconds: 1500);
+const _customBaudRatesPreferenceKey = 'customBaudRates';
+const _selectedBaudRatePreferenceKey = 'selectedBaudRate';
+const _standardBaudRates = <String>[
+  '1200',
+  '2400',
+  '4800',
+  '9600',
+  '14400',
+  '19200',
+  '38400',
+  '57600',
+  '115200',
+  '230400',
+  '460800',
+  '921600',
+  '1500000',
+  '2000000',
+];
 
 class _QueuedCommand {
   _QueuedCommand({
@@ -113,8 +129,21 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
   late final AnimationController _connectionPulseController;
   late final AnimationController _sendPanelFadeController;
   late List<SerialEntry> _entries;
+  // The parsed view is deliberately bounded; this raw capture is the source
+  // of truth for the session, manual export, and byte-for-byte comparison.
+  final List<SerialEntry> _rawEntries = [];
   final Map<SerialEntry, ParsedFrame> _parsedEntries = {};
   final List<SerialEntry> _pendingEntries = [];
+  final List<SerialEntry> _pendingRawEntries = [];
+  int _pendingReceivedBytes = 0;
+  int _pendingFramedBytes = 0;
+  int _pendingOrphanBytes = 0;
+  int _receivedBytes = 0;
+  int _framedBytes = 0;
+  int _orphanBytes = 0;
+  int _droppedBytes = 0;
+  int _droppedBurstBytes = 0;
+  int _trimmedEntryCount = 0;
   Timer? _entryFlushTimer;
   List<_SerialPort> _ports = const [];
   SendMode? _sendMode;
@@ -158,6 +187,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
   int _timeZoneOffsetMinutes = defaultTimeZoneOffsetMinutes;
   _SerialPort? _selectedPort;
   String _baudRate = '115200';
+  final List<String> _customBaudRates = [];
   String _dataBits = '8';
   String _stopBits = '1';
   String _parity = '无 None';
@@ -165,7 +195,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
   int _leftRailIndex = 0;
   int _rightRailIndex = -1;
   bool _fieldPanelOpen = false;
-  bool _integrityPanelVisible = false;
+  bool _integrityPanelOpen = false;
   bool _leftRailExpanded = true;
   bool _rightRailExpanded = true;
   bool _queuePanelExpanded = false;
@@ -174,6 +204,8 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
   void initState() {
     super.initState();
     _entries = [];
+    _receiveFramingConfig = _frameTemplate.receiveFramingConfig();
+    _receiveFramer.configure(_receiveFramingConfig);
     _connectionPulseController = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 200));
     _sendPanelFadeController = AnimationController(
@@ -201,18 +233,16 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
     super.dispose();
   }
 
-  void _showIntegrityPanel() {
+  void _toggleIntegrityPanel() {
+    if (MediaQuery.sizeOf(context).width < 960) {
+      _showMessage('窗口宽度不足，无法展开校验 Dock。');
+      return;
+    }
     setState(() {
       _fieldPanelOpen = false;
-      _rightRailIndex = 1;
-      _integrityPanelVisible = true;
-    });
-  }
-
-  void _minimizeIntegrityPanel() {
-    setState(() {
-      _integrityPanelVisible = false;
-      _rightRailIndex = -1;
+      _integrityPanelOpen = !_integrityPanelOpen;
+      _rightRailIndex = _integrityPanelOpen ? 1 : -1;
+      if (_integrityPanelOpen) _queuePanelExpanded = false;
     });
   }
 
@@ -271,36 +301,75 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
         final receivedAt =
             DateTime.tryParse(payload['timestamp']?.toString() ?? '') ??
                 DateTime.now();
-        final entries = direction == SerialDirection.tx
-            ? [
-                SerialEntry(
+        final raw = SerialEntry(
+            direction: direction,
+            timestamp: receivedAt,
+            hex: bytes,
+            label: '原始字节流');
+        try {
+          final fragments = direction == SerialDirection.tx
+              ? [FramedReceiveData(parseHexBytes(bytes), receivedAt)]
+              : _receiveFramer.addHex(bytes, receivedAt);
+          final entries = fragments
+              .map((frame) => SerialEntry(
                     direction: direction,
-                    timestamp: receivedAt,
-                    hex: bytes,
-                    label: 'Core')
-              ]
-            : _receiveFramer
-                .addHex(bytes, receivedAt)
-                .map((frame) => SerialEntry(
-                      direction: direction,
-                      timestamp: frame.timestamp,
-                      hex: frame.hex,
-                      label: 'Core',
-                    ))
-                .toList();
-        if (entries.isEmpty) return;
-        _queueIncomingEntries(entries);
+                    timestamp: frame.timestamp,
+                    hex: frame.hex,
+                    label: frame.kind == FramedReceiveKind.frame
+                        ? 'Core'
+                        : '${frame.kind.label}${frame.note == null ? '' : ' · ${frame.note}'}',
+                  ))
+              .toList();
+          final cumulativeDrop = (payload['droppedBytes'] as num?)?.toInt();
+          final burstDrop = (payload['droppedBurstBytes'] as num?)?.toInt();
+          _queueIncomingEntries(entries,
+              rawEntries: [raw],
+              receivedBytes:
+                  direction == SerialDirection.rx ? raw.byteCount : 0,
+              framedBytes: direction == SerialDirection.rx
+                  ? fragments
+                      .where((fragment) =>
+                          fragment.kind == FramedReceiveKind.frame)
+                      .fold(0, (sum, fragment) => sum + fragment.bytes.length)
+                  : 0,
+              orphanBytes: direction == SerialDirection.rx
+                  ? fragments
+                      .where((fragment) =>
+                          fragment.kind != FramedReceiveKind.frame)
+                      .fold(0, (sum, fragment) => sum + fragment.bytes.length)
+                  : 0,
+              cumulativeDrop: cumulativeDrop,
+              burstDrop: burstDrop);
+        } on FormatException catch (error) {
+          _showMessage('接收 HEX 无法解析：${error.message}');
+        }
       case 'error':
         final message = payload['message'];
         if (message is String && message.isNotEmpty) _showMessage(message);
     }
   }
 
-  void _queueIncomingEntries(Iterable<SerialEntry> entries) {
+  void _queueIncomingEntries(
+    Iterable<SerialEntry> entries, {
+    Iterable<SerialEntry> rawEntries = const [],
+    int receivedBytes = 0,
+    int framedBytes = 0,
+    int orphanBytes = 0,
+    int? cumulativeDrop,
+    int? burstDrop,
+  }) {
     _pendingEntries.addAll(entries);
-    for (final entry in entries) {
+    _pendingRawEntries.addAll(rawEntries);
+    for (final entry in rawEntries) {
       _appendRealtimeLog(entry);
     }
+    _pendingReceivedBytes += receivedBytes;
+    _pendingFramedBytes += framedBytes;
+    _pendingOrphanBytes += orphanBytes;
+    if (cumulativeDrop != null && cumulativeDrop >= _droppedBytes) {
+      _droppedBytes = cumulativeDrop;
+    }
+    if (burstDrop != null) _droppedBurstBytes = burstDrop;
     _entryFlushTimer ??= Timer(
       const Duration(milliseconds: 33),
       _flushIncomingEntries,
@@ -309,14 +378,27 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
 
   void _flushIncomingEntries() {
     _entryFlushTimer = null;
-    if (!mounted || _pendingEntries.isEmpty) return;
+    if (!mounted || (_pendingEntries.isEmpty && _pendingRawEntries.isEmpty)) {
+      return;
+    }
     final incoming = List<SerialEntry>.of(_pendingEntries);
+    final rawIncoming = List<SerialEntry>.of(_pendingRawEntries);
     _pendingEntries.clear();
+    _pendingRawEntries.clear();
     final followLatest = !_streamController.hasClients ||
         _streamController.position.maxScrollExtent -
                 _streamController.position.pixels <
             48;
-    setState(() => _appendEntries(incoming));
+    setState(() {
+      _rawEntries.addAll(rawIncoming);
+      _appendEntries(incoming);
+      _receivedBytes += _pendingReceivedBytes;
+      _framedBytes += _pendingFramedBytes;
+      _orphanBytes += _pendingOrphanBytes;
+      _pendingReceivedBytes = 0;
+      _pendingFramedBytes = 0;
+      _pendingOrphanBytes = 0;
+    });
     if (followLatest) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_streamController.hasClients) {
@@ -339,11 +421,29 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
       for (final entry in removed) {
         _parsedEntries.remove(entry);
       }
+      _trimmedEntryCount += overflow;
+      _showMessage('解析视图已移除 $overflow 条较早记录；原始字节流和导出仍完整保留。');
     }
   }
 
   void _setFrameTemplate(FrameTemplate template) {
+    final unfinished = _receiveFramer.flush().map((frame) => SerialEntry(
+          direction: SerialDirection.rx,
+          timestamp: frame.timestamp,
+          hex: frame.hex,
+          label: '${frame.kind.label} · ${frame.note ?? '模板切换前释放'}',
+        ));
     _frameTemplate = template;
+    if (_receiveFramingConfig.mode == ReceiveFramingMode.templateLength ||
+        _receiveFramingConfig.mode == ReceiveFramingMode.automatic ||
+        _receiveFramingConfig.mode == ReceiveFramingMode.idle) {
+      _receiveFramingConfig = template.receiveFramingConfig(
+          mode: _receiveFramingConfig.mode == ReceiveFramingMode.templateLength
+              ? ReceiveFramingMode.templateLength
+              : _receiveFramingConfig.mode);
+      _receiveFramer.configure(_receiveFramingConfig);
+    }
+    _appendEntries(unfinished);
     final parser = ProtocolFrameParser(template);
     _parsedEntries
       ..clear()
@@ -372,6 +472,10 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
     final previousRealtimePath = preferences.getString('lastRealtimeLogPath');
     final previousRealtimeFormat =
         _logFileFormatFromName(preferences.getString('lastRealtimeLogFormat'));
+    final customBaudRates = _normalizeBaudRates(
+        preferences.getStringList(_customBaudRatesPreferenceKey) ?? const []);
+    final selectedBaudRate =
+        preferences.getString(_selectedBaudRatePreferenceKey);
     if (!mounted) return;
     setState(() {
       if (offset != null && availableTimeZoneOffsets.contains(offset)) {
@@ -384,6 +488,14 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
       _queuePanelExpanded =
           preferences.getBool('startupQueueExpanded') ?? false;
       _startupRealtimeLoggingEnabled = shouldResumeRealtimeLogging;
+      _customBaudRates
+        ..clear()
+        ..addAll(customBaudRates);
+      if (selectedBaudRate != null &&
+          (_standardBaudRates.contains(selectedBaudRate) ||
+              customBaudRates.contains(selectedBaudRate))) {
+        _baudRate = selectedBaudRate;
+      }
     });
     if (shouldResumeRealtimeLogging &&
         previousRealtimePath != null &&
@@ -399,10 +511,124 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
     return null;
   }
 
+  List<String> get _baudRateOptions => [
+        ..._standardBaudRates,
+        ..._customBaudRates,
+      ];
+
+  List<String> _normalizeBaudRates(Iterable<String> values) {
+    final rates = values
+        .map((value) => value.trim())
+        .where(_isValidBaudRate)
+        .toSet()
+        .toList();
+    rates.sort((left, right) => int.parse(left).compareTo(int.parse(right)));
+    return rates;
+  }
+
+  bool _isValidBaudRate(String value) {
+    final rate = int.tryParse(value);
+    return rate != null && rate >= 300 && rate <= 4000000;
+  }
+
+  Future<void> _selectBaudRate(String value) async {
+    if (!mounted) return;
+    setState(() => _baudRate = value);
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(_selectedBaudRatePreferenceKey, value);
+  }
+
+  Future<void> _addCustomBaudRate() async {
+    final controller = TextEditingController();
+    final entered = await _showContainerTransformDialog<String>(
+      context: context,
+      alignment: Alignment.center,
+      builder: (context) {
+        // This is a single-value prompt, so keep its transform surface to the
+        // content card instead of allowing AlertDialog to fill the route.
+        final dialogHeight = (MediaQuery.sizeOf(context).height - 48)
+            .clamp(236.0, 280.0)
+            .toDouble();
+        return SizedBox(
+          width: 420,
+          height: dialogHeight,
+          child: AlertDialog(
+            titlePadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+            contentPadding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+            actionsPadding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            title: const Text('自定义波特率'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('波特率', style: Theme.of(context).textTheme.labelLarge),
+                const SizedBox(height: 8),
+                TextField(
+                  key: const ValueKey('custom-baud-rate-input'),
+                  controller: controller,
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: const InputDecoration(
+                    hintText: '例如 250000',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '范围 300–4,000,000；保存后下次启动仍会保留。',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, controller.text.trim()),
+                child: const Text('保存'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    // The route remains mounted during its closing transform; dispose after
+    // that animation so TextField never observes a dead controller.
+    unawaited(Future<void>.delayed(
+        const Duration(milliseconds: 400), controller.dispose));
+    if (entered == null) return;
+    if (!_isValidBaudRate(entered)) {
+      _showMessage('请输入 300–4000000 之间的整数波特率。');
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      if (!_standardBaudRates.contains(entered) &&
+          !_customBaudRates.contains(entered)) {
+        _customBaudRates.add(entered);
+        _customBaudRates
+            .sort((left, right) => int.parse(left).compareTo(int.parse(right)));
+      }
+      _baudRate = entered;
+    });
+    final preferences = await SharedPreferences.getInstance();
+    await Future.wait([
+      preferences.setStringList(
+          _customBaudRatesPreferenceKey, _customBaudRates),
+      preferences.setString(_selectedBaudRatePreferenceKey, entered),
+    ]);
+    if (mounted) _showMessage('已保存自定义波特率 $entered。');
+  }
+
   Future<void> _showSettings() async {
     final settings = await _showContainerTransformDialog<_StartupSettings>(
       context: context,
-      alignment: Alignment.topRight,
+      // Settings is a self-contained modal card. Keep the workbench visible
+      // behind it instead of visually turning the whole window into a page.
+      alignment: Alignment.center,
+      barrierColor: Colors.transparent,
       builder: (context) {
         var draftOffset = _timeZoneOffsetMinutes;
         var draftLeftDockExpanded = _leftRailExpanded;
@@ -410,153 +636,160 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
         var draftQueueExpanded = _queuePanelExpanded;
         var draftStartupRealtimeLoggingEnabled = _startupRealtimeLoggingEnabled;
         var draftIsDark = widget.isDark;
-        return StatefulBuilder(builder: (context, setDialogState) {
-          final contentHeight =
-              (MediaQuery.sizeOf(context).height - 260).clamp(280.0, 520.0);
-          return AlertDialog(
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(28),
-            ),
-            title: const Text('设置'),
-            content: SizedBox(
-              width: 440,
-              height: contentHeight,
-              child: Scrollbar(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.schedule_rounded),
-                      title: const Text('日志时间时区'),
-                      subtitle: Text(timeZoneLabel(draftOffset)),
-                    ),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: FilledButton.tonalIcon(
-                        onPressed: () async {
-                          final offset =
-                              await _chooseTimeZone(context, draftOffset);
-                          if (offset != null) {
-                            setDialogState(() => draftOffset = offset);
-                          }
-                        },
-                        icon: const Icon(Icons.edit_outlined),
-                        label: const Text('修改时区'),
-                      ),
-                    ),
-                    const Divider(height: 28),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text('启动默认值',
-                          style: Theme.of(context).textTheme.titleSmall),
-                    ),
-                    const SizedBox(height: 6),
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(draftIsDark
-                          ? Icons.dark_mode_outlined
-                          : Icons.light_mode_outlined),
-                      title: const Text('主题'),
-                      subtitle: Text(draftIsDark ? '深色' : '浅色'),
-                      trailing: SegmentedButton<bool>(
-                        segments: const [
-                          ButtonSegment(
-                              value: false,
-                              icon: Icon(Icons.light_mode_outlined, size: 16),
-                              label: Text('浅色')),
-                          ButtonSegment(
-                              value: true,
-                              icon: Icon(Icons.dark_mode_outlined, size: 16),
-                              label: Text('深色')),
-                        ],
-                        selected: {draftIsDark},
-                        showSelectedIcon: false,
-                        onSelectionChanged: (value) =>
-                            setDialogState(() => draftIsDark = value.first),
-                      ),
-                    ),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      secondary: const Icon(Icons.vertical_split_rounded),
-                      title: const Text('左侧 Dock'),
-                      subtitle: Text(draftLeftDockExpanded ? '启动时展开' : '启动时隐藏'),
-                      value: draftLeftDockExpanded,
-                      onChanged: (value) =>
-                          setDialogState(() => draftLeftDockExpanded = value),
-                    ),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      secondary: const Icon(Icons.vertical_split_rounded),
-                      title: const Text('右侧 Dock'),
-                      subtitle:
-                          Text(draftRightDockExpanded ? '启动时展开' : '启动时隐藏'),
-                      value: draftRightDockExpanded,
-                      onChanged: (value) =>
-                          setDialogState(() => draftRightDockExpanded = value),
-                    ),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      secondary: const Icon(Icons.playlist_play_rounded),
-                      title: const Text('队列编辑面板'),
-                      subtitle: Text(draftQueueExpanded ? '启动时展开' : '启动时隐藏'),
-                      value: draftQueueExpanded,
-                      onChanged: (value) =>
-                          setDialogState(() => draftQueueExpanded = value),
-                    ),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      secondary: const Icon(Icons.save_alt_rounded),
-                      title: const Text('实时保存'),
-                      subtitle: Text(draftStartupRealtimeLoggingEnabled
-                          ? '启动时续写上次选择的保存文件'
-                          : '启动时默认关闭'),
-                      value: draftStartupRealtimeLoggingEnabled,
-                      onChanged: (value) => setDialogState(
-                          () => draftStartupRealtimeLoggingEnabled = value),
-                    ),
-                    const Divider(height: 28),
-                    Card(
-                      margin: EdgeInsets.zero,
-                      clipBehavior: Clip.antiAlias,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: ListTile(
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 4),
-                        leading: const Icon(Icons.info_outline_rounded),
-                        title: const Text('关于 HCOM'),
-                        subtitle: const Text('版本、开发者、仓库与版权信息'),
-                        trailing: const Icon(Icons.chevron_right_rounded),
-                        onTap: _showAbout,
-                      ),
-                    ),
-                  ]),
-                ),
+        final dialogHeight =
+            (MediaQuery.sizeOf(context).height - 48).clamp(320.0, 720.0);
+        return SizedBox(
+          width: 560,
+          height: dialogHeight,
+          child: StatefulBuilder(builder: (context, setDialogState) {
+            final contentHeight =
+                (MediaQuery.sizeOf(context).height - 260).clamp(280.0, 520.0);
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(28),
               ),
-            ),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('取消')),
-              FilledButton(
-                  onPressed: () => Navigator.pop(
-                        context,
-                        _StartupSettings(
-                          timeZoneOffsetMinutes: draftOffset,
-                          leftDockExpanded: draftLeftDockExpanded,
-                          rightDockExpanded: draftRightDockExpanded,
-                          queueExpanded: draftQueueExpanded,
-                          startupRealtimeLoggingEnabled:
-                              draftStartupRealtimeLoggingEnabled,
-                          isDark: draftIsDark,
+              title: const Text('设置'),
+              content: SizedBox(
+                width: 440,
+                height: contentHeight,
+                child: Scrollbar(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.schedule_rounded),
+                        title: const Text('日志时间时区'),
+                        subtitle: Text(timeZoneLabel(draftOffset)),
+                      ),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: FilledButton.tonalIcon(
+                          onPressed: () async {
+                            final offset =
+                                await _chooseTimeZone(context, draftOffset);
+                            if (offset != null) {
+                              setDialogState(() => draftOffset = offset);
+                            }
+                          },
+                          icon: const Icon(Icons.edit_outlined),
+                          label: const Text('修改时区'),
                         ),
                       ),
-                  child: const Text('保存')),
-            ],
-          );
-        });
+                      const Divider(height: 28),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text('启动默认值',
+                            style: Theme.of(context).textTheme.titleSmall),
+                      ),
+                      const SizedBox(height: 6),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(draftIsDark
+                            ? Icons.dark_mode_outlined
+                            : Icons.light_mode_outlined),
+                        title: const Text('主题'),
+                        subtitle: Text(draftIsDark ? '深色' : '浅色'),
+                        trailing: SegmentedButton<bool>(
+                          segments: const [
+                            ButtonSegment(
+                                value: false,
+                                icon: Icon(Icons.light_mode_outlined, size: 16),
+                                label: Text('浅色')),
+                            ButtonSegment(
+                                value: true,
+                                icon: Icon(Icons.dark_mode_outlined, size: 16),
+                                label: Text('深色')),
+                          ],
+                          selected: {draftIsDark},
+                          showSelectedIcon: false,
+                          onSelectionChanged: (value) =>
+                              setDialogState(() => draftIsDark = value.first),
+                        ),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        secondary: const Icon(Icons.vertical_split_rounded),
+                        title: const Text('左侧 Dock'),
+                        subtitle:
+                            Text(draftLeftDockExpanded ? '启动时展开' : '启动时隐藏'),
+                        value: draftLeftDockExpanded,
+                        onChanged: (value) =>
+                            setDialogState(() => draftLeftDockExpanded = value),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        secondary: const Icon(Icons.vertical_split_rounded),
+                        title: const Text('右侧 Dock'),
+                        subtitle:
+                            Text(draftRightDockExpanded ? '启动时展开' : '启动时隐藏'),
+                        value: draftRightDockExpanded,
+                        onChanged: (value) => setDialogState(
+                            () => draftRightDockExpanded = value),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        secondary: const Icon(Icons.playlist_play_rounded),
+                        title: const Text('队列编辑面板'),
+                        subtitle: Text(draftQueueExpanded ? '启动时展开' : '启动时隐藏'),
+                        value: draftQueueExpanded,
+                        onChanged: (value) =>
+                            setDialogState(() => draftQueueExpanded = value),
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        secondary: const Icon(Icons.save_alt_rounded),
+                        title: const Text('实时保存'),
+                        subtitle: Text(draftStartupRealtimeLoggingEnabled
+                            ? '启动时续写上次选择的保存文件'
+                            : '启动时默认关闭'),
+                        value: draftStartupRealtimeLoggingEnabled,
+                        onChanged: (value) => setDialogState(
+                            () => draftStartupRealtimeLoggingEnabled = value),
+                      ),
+                      const Divider(height: 28),
+                      Card(
+                        margin: EdgeInsets.zero,
+                        clipBehavior: Clip.antiAlias,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 4),
+                          leading: const Icon(Icons.info_outline_rounded),
+                          title: const Text('关于 HPCom'),
+                          subtitle: const Text('版本、开发者、仓库与版权信息'),
+                          trailing: const Icon(Icons.chevron_right_rounded),
+                          onTap: _showAbout,
+                        ),
+                      ),
+                    ]),
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('取消')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(
+                          context,
+                          _StartupSettings(
+                            timeZoneOffsetMinutes: draftOffset,
+                            leftDockExpanded: draftLeftDockExpanded,
+                            rightDockExpanded: draftRightDockExpanded,
+                            queueExpanded: draftQueueExpanded,
+                            startupRealtimeLoggingEnabled:
+                                draftStartupRealtimeLoggingEnabled,
+                            isDark: draftIsDark,
+                          ),
+                        ),
+                    child: const Text('保存')),
+              ],
+            );
+          }),
+        );
       },
     );
     if (settings == null) return;
@@ -584,8 +817,9 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
 
   Future<void> _showAbout() => _showContainerTransformDialog<void>(
         context: context,
-        alignment: Alignment.bottomCenter,
-        builder: (context) => _AboutHcomDialog(
+        alignment: Alignment.center,
+        barrierColor: Colors.transparent,
+        builder: (context) => _AboutHpcommDialog(
           onClose: () => Navigator.pop(context),
         ),
       );
@@ -627,7 +861,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
       _bridge.send('scan_ports');
       return;
     }
-    _bridge.send('open_port', {
+    final payload = {
       'port': port.port,
       'baudRate': int.parse(_baudRate),
       'dataBits': int.parse(_dataBits),
@@ -642,8 +876,11 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
         'XON/XOFF' => 'xon_xoff',
         _ => 'none',
       },
-    });
+    };
+    _bridge.send('open_port', payload);
   }
+
+  bool get _canSend => _connected;
 
   void _selectReceiveFramingMode(ReceiveFramingMode mode) {
     if (mode == _receiveFramingConfig.mode) return;
@@ -653,12 +890,18 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
           hex: frame.hex,
           label: 'Core',
         ));
-    final config = ReceiveFramingConfig(
-      mode: mode,
-      fixedLength: _receiveFramingConfig.fixedLength,
-      headerHex: _receiveFramingConfig.headerHex,
-      trailerHex: _receiveFramingConfig.trailerHex,
-    );
+    final config = mode == ReceiveFramingMode.templateLength ||
+            mode == ReceiveFramingMode.automatic ||
+            mode == ReceiveFramingMode.idle
+        ? _frameTemplate.receiveFramingConfig(mode: mode)
+        : ReceiveFramingConfig(
+            mode: mode,
+            fixedLength: _receiveFramingConfig.fixedLength,
+            headerHex: _receiveFramingConfig.headerHex,
+            trailerHex: _receiveFramingConfig.trailerHex,
+            lengthField: _receiveFramingConfig.lengthField,
+            maximumPendingBytes: _receiveFramingConfig.maximumPendingBytes,
+          );
     setState(() {
       _appendEntries(unfinished);
       _receiveFramingConfig = config;
@@ -672,7 +915,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
       suggestedName:
           '${_frameTemplate.name.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_')}_frame.json',
       acceptedTypeGroups: const [
-        XTypeGroup(label: 'HCOM 帧模板', extensions: ['json'])
+        XTypeGroup(label: 'HPCOM 帧模板', extensions: ['json'])
       ],
     );
     if (location == null) return;
@@ -688,7 +931,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
   Future<void> _importFrameTemplate() async {
     final file = await openFile(
       acceptedTypeGroups: const [
-        XTypeGroup(label: 'HCOM 帧模板', extensions: ['json'])
+        XTypeGroup(label: 'HPCOM 帧模板', extensions: ['json'])
       ],
     );
     if (file == null) return;
@@ -785,10 +1028,15 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
                             byteLength > 4096) {
                           return;
                         }
-                        if ((kind == ProtocolFieldKind.header ||
-                                kind == ProtocolFieldKind.trailer) &&
-                            parseHexBytes(value.text).length != byteLength) {
-                          return;
+                        if (kind == ProtocolFieldKind.header ||
+                            kind == ProtocolFieldKind.trailer) {
+                          final parsedValue = tryParseHexBytes(value.text);
+                          if (!parsedValue.isValid ||
+                              parsedValue.bytes.length != byteLength) {
+                            _showMessage(
+                                parsedValue.error ?? '帧头/帧尾 HEX 长度必须与字段长度一致。');
+                            return;
+                          }
                         }
                         Navigator.pop(
                             context,
@@ -1062,7 +1310,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
   }
 
   Future<void> _startQueueSend({required bool repeat}) async {
-    if (!_connected) {
+    if (!_canSend) {
       _showMessage('请先打开串口。');
       return;
     }
@@ -1100,7 +1348,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
   }
 
   void _sendToPort() {
-    if (!_connected) {
+    if (!_canSend) {
       _showMessage('请先打开串口。');
       return;
     }
@@ -1176,7 +1424,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
       _stopPeriodicSend();
       return;
     }
-    if (!_connected) {
+    if (!_canSend) {
       _showMessage('请先打开串口。');
       return;
     }
@@ -1225,7 +1473,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
               title: Row(children: [
                 _brandLogo(size: 44),
                 const SizedBox(width: 12),
-                const Text('HCOM 调试助手'),
+                const Text('HPCom 调试助手'),
               ]),
               actions: [
                 _appAction(Icons.folder_open_rounded, '打开日志'),
@@ -1266,13 +1514,6 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
       ),
       if (_notificationMessage case final message?)
         _transientNotification(message, scheme),
-      Positioned.fill(
-        child: _FloatingIntegrityPanel(
-          visible: _integrityPanelVisible,
-          onMinimize: _minimizeIntegrityPanel,
-          onSendToMain: _fillSendInputFromIntegrityPanel,
-        ),
-      ),
     ]);
     return _usesNativeWindowFrame
         ? WindowBorder(
@@ -1340,20 +1581,13 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
         child: Row(children: [
           _brandLogo(size: 24),
           const SizedBox(width: 8),
-          Text('HCOM',
+          Text('HPCom',
               style: TextStyle(
                   color: scheme.onSurface,
                   fontFamily: HcomTheme.latinFontFamily,
                   fontWeight: FontWeight.w600,
                   letterSpacing: .5,
                   fontSize: 13)),
-          const SizedBox(width: 10),
-          Text('UART WORKBENCH',
-              style: TextStyle(
-                  color: scheme.onSurfaceVariant,
-                  fontFamily: HcomTheme.latinFontFamily,
-                  letterSpacing: .8,
-                  fontSize: 10)),
         ]),
       );
 
@@ -1492,20 +1726,14 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
   Widget _protocolRail(ColorScheme scheme) => _AnimatedRail(
         destinations: const [
           _RailDestination(Icons.usb_rounded, 'UART'),
-          _RailDestination(Icons.route_rounded, 'CAN'),
-          _RailDestination(Icons.bolt_rounded, 'CAN-FD'),
-          _RailDestination(Icons.hub_rounded, 'I2C'),
-          _RailDestination(Icons.lan_rounded, 'TCP'),
-          _RailDestination(Icons.memory_rounded, '虚拟串口'),
           _RailDestination(Icons.settings_outlined, '设置'),
         ],
         selectedIndex: _leftRailIndex,
         onSelected: (value) {
-          if (value == 6) {
+          if (value == 1) {
             unawaited(_showSettings());
             return;
           }
-          if (value != 0) _showMessage('仅 UART/COM 在 v1 范围内');
           setState(() => _leftRailIndex = value);
         },
         scheme: scheme,
@@ -1521,12 +1749,17 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
             duration: const Duration(milliseconds: 220),
             curve: Easing.emphasizedDecelerate,
             alignment: Alignment.centerRight,
-            child: _fieldPanelOpen
+            child: _fieldPanelOpen || _integrityPanelOpen
                 ? SizedBox(
                     width: 390,
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(0, 16, 10, 16),
-                      child: _fieldStream(scheme),
+                      child: _fieldPanelOpen
+                          ? _fieldStream(scheme)
+                          : IntegrityCalculatorPage(
+                              embedded: true,
+                              onSendToMain: _fillSendInputFromIntegrityPanel,
+                            ),
                     ),
                   )
                 : const SizedBox.shrink(),
@@ -1535,11 +1768,6 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
             destinations: const [
               _RailDestination(Icons.data_object_rounded, '字段'),
               _RailDestination(Icons.verified_user_rounded, '校验'),
-              _RailDestination(Icons.visibility_rounded, '帧监听'),
-              _RailDestination(Icons.show_chart_rounded, '时序'),
-              _RailDestination(Icons.science_outlined, '信号'),
-              _RailDestination(Icons.link_rounded, '抓包'),
-              _RailDestination(Icons.extension_rounded, '插件'),
             ],
             selectedIndex: _rightRailIndex,
             onSelected: (value) {
@@ -1551,19 +1779,15 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
                 setState(() {
                   _fieldPanelOpen = !_fieldPanelOpen;
                   _rightRailIndex = _fieldPanelOpen ? 0 : -1;
+                  _integrityPanelOpen = false;
                   if (_fieldPanelOpen) _queuePanelExpanded = false;
                 });
                 return;
               }
               if (value == 1) {
-                _showIntegrityPanel();
+                _toggleIntegrityPanel();
                 return;
               }
-              setState(() {
-                _fieldPanelOpen = false;
-                _rightRailIndex = value;
-              });
-              _showMessage('该扩展模块将在后续阶段接入。');
             },
             scheme: scheme,
             side: _RailSide.right,
@@ -1612,7 +1836,10 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
           );
 
           return Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+            // Keep the send surface visually separate from the persistent
+            // status bar using the same compact spacing token as nearby
+            // desktop panels.
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
             child: Row(children: [
               Expanded(child: content),
               AnimatedContainer(
@@ -1676,17 +1903,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
                             _portField(portWidth),
                             if (showIdentity && _selectedPort != null)
                               _deviceIdentity(portWidth, scheme),
-                            _selectField(
-                                '波特率',
-                                _baudRate,
-                                const [
-                                  '9600',
-                                  '38400',
-                                  '57600',
-                                  '115200',
-                                  '921600'
-                                ],
-                                (value) => setState(() => _baudRate = value)),
+                            _baudRateField(),
                             _selectField(
                                 '数据位',
                                 _dataBits,
@@ -1829,28 +2046,55 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
         ),
       );
 
+  Widget _baudRateField() => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _selectField('波特率', _baudRate, _baudRateOptions,
+              (value) => unawaited(_selectBaudRate(value))),
+          const SizedBox(width: 4),
+          Tooltip(
+            message: '添加自定义波特率',
+            child: IconButton.filledTonal(
+              onPressed: _connected || _connecting
+                  ? null
+                  : () => unawaited(_addCustomBaudRate()),
+              icon: const Icon(Icons.add_rounded, size: 18),
+            ),
+          ),
+        ],
+      );
+
   void _clearLog() {
-    if (_entries.isEmpty) return;
+    if (_entries.isEmpty && _rawEntries.isEmpty) return;
     setState(() {
       _entryFlushTimer?.cancel();
       _entryFlushTimer = null;
       _pendingEntries.clear();
+      _pendingRawEntries.clear();
       _entries.clear();
+      _rawEntries.clear();
       _parsedEntries.clear();
+      _receivedBytes = 0;
+      _framedBytes = 0;
+      _orphanBytes = 0;
+      _droppedBytes = 0;
+      _droppedBurstBytes = 0;
+      _trimmedEntryCount = 0;
+      _receiveFramer.reset();
     });
     _showMessage('已清除当前日志');
   }
 
   Future<void> _saveLogManually(LogFileFormat format) async {
-    if (_entries.isEmpty) {
+    if (_rawEntries.isEmpty) {
       _showMessage('当前没有可保存的日志。');
       return;
     }
-    final location = await _chooseLogSaveLocation(format, 'HCOM_日志');
+    final location = await _chooseLogSaveLocation(format, 'HPCOM_日志');
     if (location == null) return;
     try {
       await File(location.path).writeAsString(
-        serializeLogEntries(_entries, format, _timeZoneOffsetMinutes),
+        serializeLogEntries(_rawEntries, format, _timeZoneOffsetMinutes),
         flush: true,
       );
       if (mounted) _showMessage('日志已保存为 ${format.label}');
@@ -1860,11 +2104,11 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
   }
 
   Future<void> _startRealtimeLog(LogFileFormat format) async {
-    final location = await _chooseLogSaveLocation(format, 'HCOM_实时日志');
+    final location = await _chooseLogSaveLocation(format, 'HPCOM_实时日志');
     if (location == null) return;
     try {
       await File(location.path).writeAsString(
-        serializeLogEntries(_entries, format, _timeZoneOffsetMinutes),
+        serializeLogEntries(_rawEntries, format, _timeZoneOffsetMinutes),
         flush: true,
       );
       if (!mounted) return;
@@ -1967,7 +2211,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
     final selectedText = _selectedLogText;
     if (selectedText == null || selectedText.isEmpty) return;
     final text = formatSelectedLogCopy(
-      _entries,
+      _rawEntries,
       selectedText,
       _timeZoneOffsetMinutes,
     );
@@ -2197,7 +2441,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
                     onSelectionChanged: (content) =>
                         _selectedLogText = content?.plainText,
                     contextMenuBuilder: _logContextMenu,
-                    child: _entries.isEmpty
+                    child: _rawEntries.isEmpty
                         ? Center(
                             child: Text('打开串口后，实时 RX/TX 数据将在此显示',
                                 style:
@@ -2205,9 +2449,9 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
                         : ListView.builder(
                             controller: _streamController,
                             padding: const EdgeInsets.all(8),
-                            itemCount: _entries.length,
+                            itemCount: _rawEntries.length,
                             itemBuilder: (_, index) =>
-                                _entryRow(_entries[index], scheme, index),
+                                _entryRow(_rawEntries[index], scheme, index),
                           ),
                   ),
                 ),
@@ -2307,7 +2551,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
           message: '将当前全部日志另存为 CSV 或 TXT',
           child: FilledButton.tonalIcon(
             style: _receiveToolbarButtonStyle(),
-            onPressed: _entries.isEmpty
+            onPressed: _rawEntries.isEmpty
                 ? null
                 : () =>
                     controller.isOpen ? controller.close() : controller.open(),
@@ -2509,14 +2753,45 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
     return utf8.decode(bytes, allowMalformed: true);
   }
 
-  Widget _brandLogo({required double size}) => SizedBox(
-        width: size,
-        height: size,
-        child: SvgPicture.asset(
-          'Image/未命名的设计.svg',
-          fit: BoxFit.contain,
-        ),
-      );
+  Widget _brandLogo({required double size}) {
+    final logo = Image.asset(
+      'Image/HPCOMLOGOtouming.png',
+      fit: BoxFit.contain,
+    );
+    final isDarkTheme = Theme.of(context).brightness == Brightness.dark;
+
+    return SizedBox(
+      width: size,
+      height: size,
+      child: isDarkTheme
+          ? ColorFiltered(
+              colorFilter: const ColorFilter.matrix(<double>[
+                -1,
+                0,
+                0,
+                0,
+                255,
+                0,
+                -1,
+                0,
+                0,
+                255,
+                0,
+                0,
+                -1,
+                0,
+                255,
+                0,
+                0,
+                0,
+                1,
+                0,
+              ]),
+              child: logo,
+            )
+          : logo,
+    );
+  }
 
   Widget _sendPanel(ColorScheme scheme) => Card(
         margin: EdgeInsets.zero,
@@ -2524,8 +2799,11 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
             borderRadius: BorderRadius.all(Radius.circular(16))),
         clipBehavior: Clip.antiAlias,
         child: Padding(
+          // The collapsed composer still contains outlined inputs such as the
+          // periodic interval.  Preserve room for their floating labels so
+          // the card's rounded clipping never cuts them off.
           padding: EdgeInsets.fromLTRB(
-              16, _sendPanelExpanded ? 10 : 0, 16, _sendPanelExpanded ? 12 : 0),
+              16, _sendPanelExpanded ? 10 : 8, 16, _sendPanelExpanded ? 12 : 8),
           child: AnimatedSize(
             duration: const Duration(milliseconds: 200),
             curve: Easing.standard,
@@ -2713,7 +2991,7 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
                     backgroundColor: scheme.errorContainer,
                     foregroundColor: scheme.onErrorContainer)
                 : null,
-            onPressed: _connected
+            onPressed: _canSend
                 ? (periodicMode
                     ? _togglePeriodicSend
                     : (queueIsRunning
@@ -2984,10 +3262,10 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
   }
 
   Widget _statusBar(ColorScheme scheme) {
-    final rx = _entries
+    final rx = _rawEntries
         .where((entry) => entry.direction == SerialDirection.rx)
         .fold(0, (sum, entry) => sum + entry.byteCount);
-    final tx = _entries
+    final tx = _rawEntries
         .where((entry) => entry.direction == SerialDirection.tx)
         .fold(0, (sum, entry) => sum + entry.byteCount);
     Text item(String label, String value) => Text.rich(
@@ -3013,9 +3291,27 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
       children: [
         item('RX', '$rx B'),
         item('TX', '$tx B'),
-        item('速率', '—'),
-        item('帧', '${_entries.length}'),
-        item('校验通过率', '—'),
+        item('收到', '$_receivedBytes B'),
+        item('已归帧', '$_framedBytes B'),
+        item('孤儿', '$_orphanBytes B'),
+        Text.rich(
+          TextSpan(
+            text: '丢失 ',
+            children: [
+              TextSpan(
+                text: '累计 $_droppedBytes B / 本次 $_droppedBurstBytes B',
+                style: TextStyle(
+                  color: _droppedBytes > 0 ? scheme.error : scheme.onSurface,
+                  fontFamily: HcomTheme.latinFontFamily,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant),
+        ),
+        item('解析', '${_entries.length} 条'),
+        if (_trimmedEntryCount > 0) item('已滚动移除', '$_trimmedEntryCount 条'),
       ],
     );
     final buildIdentity = Text(
@@ -3075,16 +3371,18 @@ Future<T?> _showContainerTransformDialog<T>({
   required WidgetBuilder builder,
   Alignment alignment = Alignment.center,
   bool barrierDismissible = true,
+  Color? barrierColor,
 }) =>
     showGeneralDialog<T>(
       context: context,
       barrierDismissible: barrierDismissible,
       barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
-      barrierColor: Colors.black.withValues(alpha: .32),
+      barrierColor: barrierColor ?? Colors.black.withValues(alpha: .32),
       transitionDuration: const Duration(milliseconds: 360),
-      pageBuilder: (routeContext, _, __) => SafeArea(
-        child: Center(child: builder(routeContext)),
-      ),
+      // The transition already positions the dialog. Wrapping this child in
+      // SafeArea + Center makes the animation's decorated container inherit
+      // the entire route size, which turns a dialog into a full-window sheet.
+      pageBuilder: (routeContext, _, __) => builder(routeContext),
       transitionBuilder: (context, animation, secondaryAnimation, child) =>
           _ContainerTransformTransition(
         animation: animation,
@@ -3124,23 +3422,38 @@ class _ContainerTransformTransition extends StatelessWidget {
             child: Transform.scale(
               alignment: alignment,
               scale: .86 + (.14 * progress),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Color.lerp(
-                    scheme.secondaryContainer,
-                    scheme.surfaceContainerHigh,
-                    progress,
+              child: Align(
+                widthFactor: 1,
+                heightFactor: 1,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: (MediaQuery.sizeOf(context).width - 48)
+                        .clamp(0, 920)
+                        .toDouble(),
+                    maxHeight: (MediaQuery.sizeOf(context).height - 48)
+                        .clamp(0, 760)
+                        .toDouble(),
                   ),
-                  borderRadius: radius,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: .28 * progress),
-                      blurRadius: 28 * progress,
-                      offset: Offset(0, 12 * progress),
+                  child: DecoratedBox(
+                    key: const ValueKey('container-transform-surface'),
+                    decoration: BoxDecoration(
+                      color: Color.lerp(
+                        scheme.secondaryContainer,
+                        scheme.surfaceContainerHigh,
+                        progress,
+                      ),
+                      borderRadius: radius,
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: .28 * progress),
+                          blurRadius: 28 * progress,
+                          offset: Offset(0, 12 * progress),
+                        ),
+                      ],
                     ),
-                  ],
+                    child: ClipRRect(borderRadius: radius, child: child!),
+                  ),
                 ),
-                child: ClipRRect(borderRadius: radius, child: child!),
               ),
             ),
           ),
@@ -3325,8 +3638,8 @@ class _AboutDetail extends StatelessWidget {
       );
 }
 
-class _AboutHcomDialog extends StatelessWidget {
-  const _AboutHcomDialog({required this.onClose});
+class _AboutHpcommDialog extends StatelessWidget {
+  const _AboutHpcommDialog({required this.onClose});
 
   final VoidCallback onClose;
 
@@ -3337,222 +3650,125 @@ class _AboutHcomDialog extends StatelessWidget {
       fontFamily: HcomTheme.chineseFontFamily,
       fontFamilyFallback: HcomTheme.chineseFallback,
     );
-    return AlertDialog(
-      icon: Container(
-        width: 52,
-        height: 52,
-        decoration: BoxDecoration(
-          color: scheme.primaryContainer,
-          shape: BoxShape.circle,
+    return SizedBox(
+      width: 560,
+      height: (MediaQuery.sizeOf(context).height - 96).clamp(360.0, 680.0),
+      child: AlertDialog(
+        icon: Container(
+          width: 52,
+          height: 52,
+          decoration: BoxDecoration(
+            color: scheme.primaryContainer,
+            shape: BoxShape.circle,
+          ),
+          child: Icon(Icons.memory_rounded, color: scheme.onPrimaryContainer),
         ),
-        child: Icon(Icons.memory_rounded, color: scheme.onPrimaryContainer),
-      ),
-      title: const Text('关于 HCOM', style: chinese),
-      content: SizedBox(
-        width: 448,
-        child: SingleChildScrollView(
-          child: SelectionArea(
-            child: DefaultTextStyle.merge(
-              style: chinese,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'HCOM 串口调试助手',
-                    style: chinese.copyWith(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w700,
-                      color: scheme.onSurface,
+        title: const Text('关于 HPCom', style: chinese),
+        content: SizedBox(
+          width: 448,
+          child: SingleChildScrollView(
+            child: SelectionArea(
+              child: DefaultTextStyle.merge(
+                style: chinese,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'HPCom 串口调试助手',
+                      style: chinese.copyWith(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        color: scheme.onSurface,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    '面向 Windows 的 UART/COM 调试与协议帧解析工具。',
-                    style: chinese.copyWith(color: scheme.onSurfaceVariant),
-                  ),
-                  const SizedBox(height: 14),
-                  const Wrap(spacing: 8, runSpacing: 8, children: [
-                    Chip(
-                      avatar: Icon(Icons.verified_outlined, size: 18),
-                      label: Text('版本 $applicationVersion', style: chinese),
+                    const SizedBox(height: 6),
+                    Text(
+                      '面向 Windows 的 UART/COM 调试与协议帧解析工具。',
+                      style: chinese.copyWith(color: scheme.onSurfaceVariant),
                     ),
-                    Chip(
-                      avatar: Icon(Icons.desktop_windows_outlined, size: 18),
-                      label: Text('Windows 桌面端', style: chinese),
-                    ),
-                  ]),
-                  const SizedBox(height: 16),
-                  Card(
-                    color: scheme.surfaceContainerLow,
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: DefaultTextStyle.merge(
-                        style: chinese,
-                        child: const Column(
-                          children: [
-                            _AboutDetail(label: '开发者', value: 'Tylenoler'),
-                            _AboutDetail(
-                              label: '开源仓库',
-                              value: 'github.com/Tylenoler/HCOM',
-                            ),
-                            _AboutDetail(
-                              label: '著作权',
-                              value: '© 2026 Tylenoler',
-                            ),
-                            _AboutDetail(
-                              label: '组件版本',
-                              value:
-                                  'App $applicationVersion · Core $coreVersion · IPC $protocolVersion',
-                            ),
-                            _AboutDetail(
-                              label: 'Git 提交',
-                              value: buildGitRevision,
-                            ),
-                            _AboutDetail(
-                              label: '构建时间',
-                              value: buildTimestamp,
-                            ),
-                          ],
+                    const SizedBox(height: 14),
+                    const Wrap(spacing: 8, runSpacing: 8, children: [
+                      Chip(
+                        avatar: Icon(Icons.verified_outlined, size: 18),
+                        label: Text('版本 $applicationVersion', style: chinese),
+                      ),
+                      Chip(
+                        avatar: Icon(Icons.desktop_windows_outlined, size: 18),
+                        label: Text('Windows 桌面端', style: chinese),
+                      ),
+                    ]),
+                    const SizedBox(height: 16),
+                    Card(
+                      color: scheme.surfaceContainerLow,
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: DefaultTextStyle.merge(
+                          style: chinese,
+                          child: const Column(
+                            children: [
+                              _AboutDetail(label: '开发者', value: 'Tylenoler'),
+                              _AboutDetail(
+                                label: '开源仓库',
+                                value: 'github.com/Tylenoler/HCOM',
+                              ),
+                              _AboutDetail(
+                                label: '著作权',
+                                value: '© 2026 Tylenoler',
+                              ),
+                              _AboutDetail(
+                                label: '组件版本',
+                                value:
+                                    'App $applicationVersion · Core $coreVersion · IPC $protocolVersion',
+                              ),
+                              _AboutDetail(
+                                label: 'Git 提交',
+                                value: buildGitRevision,
+                              ),
+                              _AboutDetail(
+                                label: '构建时间',
+                                value: buildTimestamp,
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    '本软件按“自用与开源同步”的原则持续演进。保留所有权利。',
-                    style: chinese.copyWith(
-                      fontSize: 12,
-                      color: scheme.onSurfaceVariant,
+                    const SizedBox(height: 10),
+                    Text(
+                      '本软件按“自用与开源同步”的原则持续演进。保留所有权利。',
+                      style: chinese.copyWith(
+                        fontSize: 12,
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
         ),
-      ),
-      actions: [
-        TextButton.icon(
-          onPressed: onClose,
-          icon: const Icon(Icons.close_rounded),
-          label: const Text('关闭', style: chinese),
-        ),
-      ],
-    );
-  }
-}
-
-class _FloatingIntegrityPanel extends StatefulWidget {
-  const _FloatingIntegrityPanel({
-    required this.visible,
-    required this.onMinimize,
-    required this.onSendToMain,
-  });
-
-  final bool visible;
-  final VoidCallback onMinimize;
-  final ValueChanged<String> onSendToMain;
-
-  @override
-  State<_FloatingIntegrityPanel> createState() =>
-      _FloatingIntegrityPanelState();
-}
-
-class _FloatingIntegrityPanelState extends State<_FloatingIntegrityPanel> {
-  Offset? _offset;
-
-  void _resetPosition() => setState(() => _offset = null);
-
-  void _dragBy(DragUpdateDetails details, Size panelSize, Size canvasSize) {
-    final current = _offset ?? _defaultOffset(panelSize, canvasSize);
-    setState(() {
-      _offset = _clampOffset(current + details.delta, panelSize, canvasSize);
-    });
-  }
-
-  Offset _defaultOffset(Size panelSize, Size canvasSize) => _clampOffset(
-        Offset(canvasSize.width - panelSize.width - 82, 94),
-        panelSize,
-        canvasSize,
-      );
-
-  Offset _clampOffset(Offset value, Size panelSize, Size canvasSize) {
-    const margin = 12.0;
-    final maxX = (canvasSize.width - panelSize.width - margin).clamp(
-      margin,
-      double.infinity,
-    );
-    final maxY = (canvasSize.height - panelSize.height - margin).clamp(
-      margin,
-      double.infinity,
-    );
-    return Offset(
-      value.dx.clamp(margin, maxX).toDouble(),
-      value.dy.clamp(margin, maxY).toDouble(),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) => Offstage(
-        offstage: !widget.visible,
-        child: IgnorePointer(
-          ignoring: !widget.visible,
-          child: AnimatedOpacity(
-            opacity: widget.visible ? 1 : 0,
-            duration: const Duration(milliseconds: 360),
-            curve: Easing.emphasizedDecelerate,
-            child: AnimatedScale(
-              scale: widget.visible ? 1 : .82,
-              alignment: Alignment.centerRight,
-              duration: const Duration(milliseconds: 360),
-              curve: Easing.emphasizedDecelerate,
-              child: LayoutBuilder(builder: (context, constraints) {
-                final width = math.min(640.0, constraints.maxWidth - 24);
-                final height = math.min(660.0, constraints.maxHeight - 24);
-                final panelSize = Size(width, height);
-                final canvasSize =
-                    Size(constraints.maxWidth, constraints.maxHeight);
-                final offset = _clampOffset(
-                  _offset ?? _defaultOffset(panelSize, canvasSize),
-                  panelSize,
-                  canvasSize,
-                );
-                return Stack(children: [
-                  Positioned(
-                    left: offset.dx,
-                    top: offset.dy,
-                    width: panelSize.width,
-                    height: panelSize.height,
-                    child: IntegrityCalculatorPage(
-                      onMinimize: widget.onMinimize,
-                      onResetPosition: _resetPosition,
-                      onDragUpdate: (details) =>
-                          _dragBy(details, panelSize, canvasSize),
-                      onSendToMain: widget.onSendToMain,
-                    ),
-                  ),
-                ]);
-              }),
-            ),
+        actions: [
+          TextButton.icon(
+            onPressed: onClose,
+            icon: const Icon(Icons.close_rounded),
+            label: const Text('关闭', style: chinese),
           ),
-        ),
-      );
+        ],
+      ),
+    );
+  }
 }
 
 class IntegrityCalculatorPage extends StatefulWidget {
   const IntegrityCalculatorPage({
     super.key,
     this.onSendToMain,
-    this.onMinimize,
-    this.onResetPosition,
-    this.onDragUpdate,
+    this.embedded = false,
   });
 
   final ValueChanged<String>? onSendToMain;
-  final VoidCallback? onMinimize;
-  final VoidCallback? onResetPosition;
-  final GestureDragUpdateCallback? onDragUpdate;
+  final bool embedded;
 
   @override
   State<IntegrityCalculatorPage> createState() =>
@@ -3766,61 +3982,38 @@ class _IntegrityCalculatorPageState extends State<IntegrityCalculatorPage> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return Padding(
-      padding: const EdgeInsets.all(20),
+      padding: widget.embedded ? EdgeInsets.zero : const EdgeInsets.all(20),
       child: Material(
         key: const ValueKey('integrity-calculator-window'),
         color: scheme.surfaceContainerHigh,
-        elevation: 8,
+        elevation: widget.embedded ? 0 : 8,
         shadowColor: Colors.black.withValues(alpha: .28),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(28),
+          borderRadius: BorderRadius.circular(widget.embedded ? 16 : 28),
           side: BorderSide(color: scheme.outlineVariant),
         ),
         clipBehavior: Clip.antiAlias,
         child: Column(children: [
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onPanUpdate: widget.onDragUpdate,
-            child: MouseRegion(
-              cursor: widget.onDragUpdate == null
-                  ? MouseCursor.defer
-                  : SystemMouseCursors.move,
-              child: Container(
-                height: 72,
-                padding: const EdgeInsets.symmetric(horizontal: 18),
-                color: scheme.surfaceContainerHighest,
-                child: Row(children: [
-                  Icon(Icons.verified_user_rounded, color: scheme.primary),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('校验模块',
-                            style: TextStyle(fontWeight: FontWeight.w700)),
-                        Text(_algorithm.label,
-                            style: const TextStyle(fontSize: 12)),
-                      ],
-                    ),
-                  ),
-                  if (widget.onResetPosition != null)
-                    IconButton(
-                      tooltip: '恢复默认位置',
-                      onPressed: widget.onResetPosition,
-                      icon: const Icon(Icons.filter_center_focus_rounded),
-                    ),
-                  if (widget.onMinimize != null) ...[
-                    const SizedBox(width: 4),
-                    IconButton(
-                      tooltip: '缩小校验面板',
-                      onPressed: widget.onMinimize,
-                      icon: const Icon(Icons.minimize_rounded),
-                    ),
+          Container(
+            height: 64,
+            padding: const EdgeInsets.symmetric(horizontal: 18),
+            color: scheme.surfaceContainerHighest,
+            child: Row(children: [
+              Icon(Icons.verified_user_rounded, color: scheme.primary),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('校验',
+                        style: TextStyle(fontWeight: FontWeight.w700)),
+                    Text(_algorithm.label,
+                        style: const TextStyle(fontSize: 12)),
                   ],
-                ]),
+                ),
               ),
-            ),
+            ]),
           ),
           Expanded(
             child: SingleChildScrollView(

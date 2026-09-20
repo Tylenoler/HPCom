@@ -6,7 +6,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
-        Arc,
+        Arc, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -19,9 +19,16 @@ use serialport::{
     DataBits, FlowControl, Parity, SerialPort, SerialPortInfo, SerialPortType, StopBits,
 };
 
+#[cfg(windows)]
+mod windows_relay;
+#[cfg(windows)]
+mod windows_vcom;
+
 const READ_BUFFER_BYTES: usize = 1024;
 const MAX_BATCH_BYTES: usize = 4 * 1024;
-const MAX_EVENT_QUEUE: usize = 128;
+// RX display events may yield to control/relay work, but a 512-event burst
+// window avoids needless loss during normal Dart scheduling pauses.
+const MAX_EVENT_QUEUE: usize = 512;
 const MAX_WRITE_BYTES: usize = 16 * 1024;
 const RX_IDLE_BOUNDARY: Duration = Duration::from_millis(6);
 
@@ -40,8 +47,29 @@ enum CoreEvent {
         bytes: Vec<u8>,
         timestamp: String,
         dropped_bytes: u64,
+        dropped_burst_bytes: u64,
     },
     SerialFault {
+        session: u64,
+        message: String,
+    },
+    MonitorData {
+        session: u64,
+        bytes: Vec<u8>,
+        timestamp: String,
+        dropped_bytes: u64,
+        dropped_burst_bytes: u64,
+    },
+    MonitorFault {
+        session: u64,
+        message: String,
+    },
+    PeriodicTx {
+        session: u64,
+        bytes: Vec<u8>,
+        timestamp: String,
+    },
+    PeriodicFault {
         session: u64,
         message: String,
     },
@@ -49,15 +77,22 @@ enum CoreEvent {
 
 struct PortSession {
     id: u64,
-    port: Box<dyn SerialPort>,
-    stop: Arc<AtomicBool>,
-    reader: JoinHandle<()>,
+    port: Option<Arc<Mutex<Box<dyn SerialPort>>>>,
+    relay_port: Option<Arc<Mutex<Option<Arc<Mutex<Box<dyn SerialPort>>>>>>>,
+    stop: Option<Arc<AtomicBool>>,
+    reader: Option<JoinHandle<()>>,
+    monitor: Option<MonitorSession>,
+    #[cfg(windows)]
+    native_monitor: Option<windows_relay::NativeMonitorSession>,
+}
+
+struct MonitorSession {
+    virtual_port: String,
 }
 
 struct PeriodicSend {
-    interval: Duration,
-    commands: Vec<Vec<u8>>,
-    next_due: Instant,
+    stop: Arc<AtomicBool>,
+    worker: JoinHandle<()>,
 }
 
 /// UART is a byte stream: a single write may be returned by the operating
@@ -71,6 +106,13 @@ struct PendingRx {
 }
 
 impl PendingRx {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(capacity),
+            timestamp: None,
+        }
+    }
+
     fn append(&mut self, bytes: &[u8], received_at: String) {
         if self.bytes.is_empty() {
             self.timestamp = Some(received_at);
@@ -183,6 +225,35 @@ fn scan_ports() {
     }
 }
 
+fn virtual_port_name(value: &str) -> Result<String, String> {
+    let value = value.trim().to_ascii_uppercase();
+    let number = value
+        .strip_prefix("COM")
+        .and_then(|suffix| suffix.parse::<u16>().ok())
+        .filter(|number| *number > 0)
+        .ok_or_else(|| "虚拟端口必须是 COM 后跟正整数，例如 COM50。".to_owned())?;
+    Ok(format!("COM{number}"))
+}
+
+fn create_virtual_pair(payload: &Value) -> Result<(String, String), String> {
+    let external_port = virtual_port_name(&payload_string(payload, "externalPort")?)?;
+    let monitor_port = virtual_port_name(&payload_string(payload, "monitorPort")?)?;
+    if external_port == monitor_port {
+        return Err("虚拟端口对的两个端口必须不同。".to_owned());
+    }
+    #[cfg(windows)]
+    {
+        windows_vcom::create_pair(&external_port, &monitor_port)?;
+        return Ok((external_port, monitor_port));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (external_port, monitor_port);
+        Err("HPCOM 虚拟串口驱动仅支持 Windows。".to_owned())
+    }
+}
+
 fn data_bits(value: u64) -> Result<DataBits, String> {
     match value {
         5 => Ok(DataBits::Five),
@@ -254,15 +325,23 @@ fn payload_hex_commands(payload: &Value) -> Result<Vec<Vec<u8>>, String> {
         .collect()
 }
 
-fn write_serial_data(opened: &mut PortSession, bytes: &[u8]) -> Result<(), String> {
-    opened
-        .port
-        .write_all(bytes)
+fn write_port(port: &Arc<Mutex<Box<dyn SerialPort>>>, bytes: &[u8]) -> Result<(), String> {
+    let mut port = port.lock().map_err(|_| "串口写入通道已失效。".to_owned())?;
+    port.write_all(bytes)
         .map_err(|error| format!("串口写入失败：{error}"))?;
-    opened
+    // Do not call SerialPort::flush here. On Windows it maps to
+    // FlushFileBuffers and waits for the UART/USB driver to drain, turning
+    // every relay packet into a multi-millisecond synchronous barrier.
+    // WriteFile has already handed the bytes to the kernel driver.
+    Ok(())
+}
+
+fn write_serial_data(opened: &PortSession, bytes: &[u8]) -> Result<(), String> {
+    let port = opened
         .port
-        .flush()
-        .map_err(|error| format!("串口刷新失败：{error}"))?;
+        .as_ref()
+        .ok_or_else(|| "当前连接没有可写串口。".to_owned())?;
+    write_port(port, bytes)?;
     emit(
         "serial_data",
         json!({"direction": "tx", "timestamp": timestamp(), "bytes": hex(bytes)}),
@@ -270,35 +349,58 @@ fn write_serial_data(opened: &mut PortSession, bytes: &[u8]) -> Result<(), Strin
     Ok(())
 }
 
-fn run_periodic_send(periodic: &mut Option<PeriodicSend>, session: &mut Option<PortSession>) {
-    let Some(job) = periodic.as_ref() else {
-        return;
-    };
-    let commands = job.commands.clone();
-    let interval = job.interval;
-
-    for bytes in commands {
-        let Some(opened) = session.as_mut() else {
-            *periodic = None;
-            emit_error("periodic_stopped", "串口已关闭，周期发送已停止。");
-            emit("periodic_state", json!({"active": false}));
-            return;
-        };
-        if let Err(error) = write_serial_data(opened, &bytes) {
-            *periodic = None;
-            emit_error("periodic_write_failed", error);
-            emit("periodic_state", json!({"active": false}));
-            return;
+fn start_periodic_worker(
+    session: u64,
+    port: Arc<Mutex<Box<dyn SerialPort>>>,
+    interval: Duration,
+    commands: Vec<Vec<u8>>,
+    sender: SyncSender<CoreEvent>,
+) -> PeriodicSend {
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let worker = thread::spawn(move || {
+        // This is deliberately independent from the Core command/event loop:
+        // UI rendering or a busy RX queue must not determine periodic timing.
+        let mut next_due = Instant::now();
+        while !worker_stop.load(Ordering::Relaxed) {
+            for bytes in &commands {
+                if worker_stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Err(error) = write_port(&port, bytes) {
+                    let _ = sender.try_send(CoreEvent::PeriodicFault {
+                        session,
+                        message: error,
+                    });
+                    return;
+                }
+                let _ = sender.try_send(CoreEvent::PeriodicTx {
+                    session,
+                    bytes: bytes.clone(),
+                    timestamp: timestamp(),
+                });
+            }
+            next_due += interval;
+            let wait = next_due.saturating_duration_since(Instant::now());
+            if !wait.is_zero() {
+                thread::park_timeout(wait);
+            }
         }
-    }
+    });
+    PeriodicSend { stop, worker }
+}
 
-    if let Some(job) = periodic.as_mut() {
-        job.next_due = Instant::now() + interval;
+fn stop_periodic(periodic: Option<PeriodicSend>) {
+    if let Some(periodic) = periodic {
+        periodic.stop.store(true, Ordering::Relaxed);
+        periodic.worker.thread().unpark();
+        let _ = periodic.worker.join();
     }
 }
 
 fn spawn_reader(
     mut port: Box<dyn SerialPort>,
+    relay_port: Arc<Mutex<Option<Arc<Mutex<Box<dyn SerialPort>>>>>>,
     session: u64,
     stop: Arc<AtomicBool>,
     sender: SyncSender<CoreEvent>,
@@ -307,38 +409,55 @@ fn spawn_reader(
         let mut buffer = [0_u8; READ_BUFFER_BYTES];
         let mut pending = PendingRx::default();
         let mut dropped_bytes = 0_u64;
+        let mut dropped_burst_bytes = 0_u64;
 
-        let send_pending = |pending: &mut PendingRx, dropped_bytes: &mut u64| {
-            let Some((bytes, received_at)) = pending.take() else {
-                return true;
-            };
-            let event = CoreEvent::SerialData {
-                session,
-                bytes,
-                timestamp: received_at,
-                dropped_bytes: *dropped_bytes,
-            };
-            match sender.try_send(event) {
-                Ok(()) => {
-                    *dropped_bytes = 0;
-                    true
+        let send_pending =
+            |pending: &mut PendingRx, dropped_bytes: &mut u64, dropped_burst_bytes: &mut u64| {
+                let Some((bytes, received_at)) = pending.take() else {
+                    return true;
+                };
+                let event = CoreEvent::SerialData {
+                    session,
+                    bytes,
+                    timestamp: received_at,
+                    dropped_bytes: *dropped_bytes,
+                    dropped_burst_bytes: *dropped_burst_bytes,
+                };
+                match sender.try_send(event) {
+                    Ok(()) => {
+                        *dropped_burst_bytes = 0;
+                        true
+                    }
+                    Err(TrySendError::Full(CoreEvent::SerialData { bytes, .. })) => {
+                        *dropped_bytes += bytes.len() as u64;
+                        *dropped_burst_bytes += bytes.len() as u64;
+                        true
+                    }
+                    Err(TrySendError::Disconnected(_)) => false,
+                    Err(TrySendError::Full(_)) => unreachable!("reader only sends serial data"),
                 }
-                Err(TrySendError::Full(CoreEvent::SerialData { bytes, .. })) => {
-                    *dropped_bytes += bytes.len() as u64;
-                    true
-                }
-                Err(TrySendError::Disconnected(_)) => false,
-                Err(TrySendError::Full(_)) => unreachable!("reader only sends serial data"),
-            }
-        };
+            };
 
         while !stop.load(Ordering::Relaxed) {
             match port.read(&mut buffer) {
                 Ok(0) => {}
                 Ok(count) => {
+                    // Relay transport is deliberately independent from the
+                    // 6 ms display coalescer below. Forward this completed
+                    // read immediately; batching applies only to UI/logging.
+                    let virtual_port = relay_port.lock().ok().and_then(|port| port.clone());
+                    if let Some(virtual_port) = virtual_port {
+                        if let Err(error) = write_port(&virtual_port, &buffer[..count]) {
+                            let _ = sender.send(CoreEvent::SerialFault {
+                                session,
+                                message: format!("真实串口转发到虚拟串口失败：{error}"),
+                            });
+                            break;
+                        }
+                    }
                     pending.append(&buffer[..count], timestamp());
                     if pending.bytes.len() >= MAX_BATCH_BYTES
-                        && !send_pending(&mut pending, &mut dropped_bytes)
+                        && !send_pending(&mut pending, &mut dropped_bytes, &mut dropped_burst_bytes)
                     {
                         break;
                     }
@@ -349,7 +468,7 @@ fn spawn_reader(
                         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                     ) =>
                 {
-                    if !send_pending(&mut pending, &mut dropped_bytes) {
+                    if !send_pending(&mut pending, &mut dropped_bytes, &mut dropped_burst_bytes) {
                         break;
                     }
                 }
@@ -367,10 +486,23 @@ fn spawn_reader(
     })
 }
 
-fn close_session(session: PortSession) {
-    session.stop.store(true, Ordering::Relaxed);
-    drop(session.port);
-    let _ = session.reader.join();
+fn close_session(mut session: PortSession) {
+    if let Some(relay_port) = session.relay_port.as_ref() {
+        if let Ok(mut relay_port) = relay_port.lock() {
+            *relay_port = None;
+        }
+    }
+    if let Some(stop) = session.stop.take() {
+        stop.store(true, Ordering::Relaxed);
+    }
+    drop(session.port.take());
+    if let Some(reader) = session.reader.take() {
+        let _ = reader.join();
+    }
+    #[cfg(windows)]
+    if let Some(native_monitor) = session.native_monitor.take() {
+        native_monitor.close();
+    }
 }
 
 fn open_port(
@@ -409,14 +541,92 @@ fn open_port(
     // Flush only drains outgoing bytes retained by a previous handle. It does
     // not discard incoming data, which must remain visible to the user.
     let _ = port.flush();
+    let port = Arc::new(Mutex::new(port));
+    let relay_port = Arc::new(Mutex::new(None));
     let stop = Arc::new(AtomicBool::new(false));
-    let reader = spawn_reader(reader_port, session_id, Arc::clone(&stop), sender);
+    let reader = spawn_reader(
+        reader_port,
+        Arc::clone(&relay_port),
+        session_id,
+        Arc::clone(&stop),
+        sender,
+    );
     Ok(PortSession {
         id: session_id,
-        port,
-        stop,
-        reader,
+        port: Some(port),
+        relay_port: Some(relay_port),
+        stop: Some(stop),
+        reader: Some(reader),
+        monitor: None,
+        #[cfg(windows)]
+        native_monitor: None,
     })
+}
+
+fn open_monitor(
+    payload: &Value,
+    session_id: u64,
+    sender: SyncSender<CoreEvent>,
+) -> Result<PortSession, String> {
+    let physical_port_name = payload_string(payload, "port")?;
+    let virtual_port_name = payload_string(payload, "virtualPort")?;
+    let baud_rate = payload_u64(payload, "baudRate")? as u32;
+    let data_bits = data_bits(payload.get("dataBits").and_then(Value::as_u64).unwrap_or(8))?;
+    let stop_bits = stop_bits(payload.get("stopBits").and_then(Value::as_u64).unwrap_or(1))?;
+    let parity = parity(
+        payload
+            .get("parity")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+    )?;
+    let flow_control = flow_control(
+        payload
+            .get("flowControl")
+            .and_then(Value::as_str)
+            .unwrap_or("none"),
+    )?;
+    #[cfg(windows)]
+    {
+        let native_monitor = windows_relay::open(
+            &physical_port_name,
+            &virtual_port_name,
+            windows_relay::LinkSettings {
+                baud_rate,
+                data_bits,
+                stop_bits,
+                parity,
+                flow_control,
+            },
+            session_id,
+            sender,
+        )?;
+        return Ok(PortSession {
+            id: session_id,
+            port: None,
+            relay_port: None,
+            stop: None,
+            reader: None,
+            monitor: Some(MonitorSession {
+                virtual_port: native_monitor.virtual_port.clone(),
+            }),
+            native_monitor: Some(native_monitor),
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            physical_port_name,
+            virtual_port_name,
+            baud_rate,
+            data_bits,
+            stop_bits,
+            parity,
+            flow_control,
+            session_id,
+            sender,
+        );
+        Err("HPCOM 旁路监听仅支持 Windows。".to_owned())
+    }
 }
 
 fn start_command_reader(sender: SyncSender<CoreEvent>) {
@@ -440,7 +650,7 @@ fn main() {
 
     emit(
         "ready",
-        json!({"protocolVersion": 1, "coreVersion": "0.2.0"}),
+        json!({"protocolVersion": 2, "coreVersion": "0.3.0"}),
     );
     emit_state("disconnected", None);
 
@@ -448,11 +658,7 @@ fn main() {
     let mut periodic: Option<PeriodicSend> = None;
     let mut next_session_id = 1_u64;
     loop {
-        let wait = periodic
-            .as_ref()
-            .map(|job| job.next_due.saturating_duration_since(Instant::now()))
-            .unwrap_or_else(|| Duration::from_millis(100));
-        match receiver.recv_timeout(wait) {
+        match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(CoreEvent::Command(Err(error))) => emit_error("invalid_command", error),
             Ok(CoreEvent::Command(Ok(command))) => match command.command.as_str() {
                 "hello" => {
@@ -468,6 +674,16 @@ fn main() {
                 }
                 "ping" => emit("pong", json!({})),
                 "scan_ports" => scan_ports(),
+                "create_virtual_pair" => match create_virtual_pair(&command.payload) {
+                    Ok((external_port, monitor_port)) => {
+                        emit(
+                            "virtual_pair",
+                            json!({"externalPort": external_port, "monitorPort": monitor_port}),
+                        );
+                        scan_ports();
+                    }
+                    Err(error) => emit_error("virtual_pair_failed", error),
+                },
                 "open_port" => {
                     if session.is_some() {
                         emit_error("already_connected", "已有串口处于连接状态，请先关闭它。");
@@ -489,11 +705,43 @@ fn main() {
                         }
                     }
                 }
+                "open_monitor" => {
+                    if session.is_some() {
+                        emit_error("already_connected", "已有串口处于连接状态，请先关闭它。");
+                        continue;
+                    }
+                    let name = payload_string(&command.payload, "port")
+                        .unwrap_or_else(|_| "串口".to_owned());
+                    emit_state("connecting", Some(&name));
+                    match open_monitor(&command.payload, next_session_id, sender.clone()) {
+                        Ok(opened) => {
+                            let virtual_port = opened
+                                .monitor
+                                .as_ref()
+                                .map(|monitor| monitor.virtual_port.clone())
+                                .unwrap_or_default();
+                            next_session_id += 1;
+                            emit_state("connected", Some(&name));
+                            emit(
+                                "monitor_state",
+                                json!({"active": true, "virtualPort": virtual_port}),
+                            );
+                            session = Some(opened);
+                        }
+                        Err(error) => {
+                            emit_error("monitor_open_failed", error);
+                            emit("monitor_state", json!({"active": false}));
+                            emit_state("disconnected", None);
+                            scan_ports();
+                        }
+                    }
+                }
                 "close_port" => {
-                    periodic = None;
+                    stop_periodic(periodic.take());
                     if let Some(opened) = session.take() {
                         close_session(opened);
                     }
+                    emit("monitor_state", json!({"active": false}));
                     emit_state("disconnected", None);
                     scan_ports();
                 }
@@ -501,8 +749,13 @@ fn main() {
                     let result = (|| {
                         let bytes = parse_hex(&payload_string(&command.payload, "bytes")?)?;
                         let opened = session
-                            .as_mut()
+                            .as_ref()
                             .ok_or_else(|| "当前没有已连接的串口。".to_owned())?;
+                        if opened.monitor.is_some() {
+                            return Err(
+                                "旁路监听中由外部软件写入虚拟串口，HPCOM 不主动发送。".to_owned()
+                            );
+                        }
                         write_serial_data(opened, &bytes)
                     })();
                     if let Err(error) = result {
@@ -515,29 +768,36 @@ fn main() {
                         if interval_ms < 10 || interval_ms > 3_600_000 {
                             return Err("周期必须在 10–3600000 ms 之间。".to_owned());
                         }
-                        if session.is_none() {
-                            return Err("当前没有已连接的串口。".to_owned());
+                        let opened = session
+                            .as_ref()
+                            .ok_or_else(|| "当前没有已连接的串口。".to_owned())?;
+                        if opened.monitor.is_some() {
+                            return Err("旁路监听中不支持 HPCOM 周期发送。".to_owned());
                         }
                         let commands = payload_hex_commands(&command.payload)?;
-                        periodic = Some(PeriodicSend {
-                            interval: Duration::from_millis(interval_ms),
+                        let port = opened
+                            .port
+                            .as_ref()
+                            .ok_or_else(|| "当前连接没有可用于周期发送的串口。".to_owned())?;
+                        stop_periodic(periodic.take());
+                        periodic = Some(start_periodic_worker(
+                            opened.id,
+                            Arc::clone(port),
+                            Duration::from_millis(interval_ms),
                             commands,
-                            next_due: Instant::now(),
-                        });
-                        run_periodic_send(&mut periodic, &mut session);
-                        if periodic.is_some() {
-                            emit("periodic_state", json!({"active": true}));
-                        }
+                            sender.clone(),
+                        ));
+                        emit("periodic_state", json!({"active": true}));
                         Ok::<(), String>(())
                     })();
                     if let Err(error) = result {
-                        periodic = None;
+                        stop_periodic(periodic.take());
                         emit_error("periodic_start_failed", error);
                         emit("periodic_state", json!({"active": false}));
                     }
                 }
                 "stop_periodic" => {
-                    periodic = None;
+                    stop_periodic(periodic.take());
                     emit("periodic_state", json!({"active": false}));
                 }
                 _ => emit_error("unsupported", "不支持的 Core 命令。"),
@@ -547,6 +807,7 @@ fn main() {
                 bytes,
                 timestamp,
                 dropped_bytes,
+                dropped_burst_bytes,
             }) => {
                 if session
                     .as_ref()
@@ -554,14 +815,65 @@ fn main() {
                 {
                     emit(
                         "serial_data",
-                        json!({"direction": "rx", "timestamp": timestamp, "bytes": hex(&bytes), "droppedBytes": dropped_bytes}),
+                        json!({"direction": "rx", "timestamp": timestamp, "bytes": hex(&bytes), "droppedBytes": dropped_bytes, "droppedBurstBytes": dropped_burst_bytes}),
                     );
-                    if dropped_bytes > 0 {
+                    if dropped_burst_bytes > 0 {
                         emit_error(
                             "backpressure",
-                            format!("UI 消费过慢，已丢弃 {dropped_bytes} 字节以保持内存有界。"),
+                            format!("UI 消费过慢，本次丢弃 {dropped_burst_bytes} 字节；累计 {dropped_bytes} 字节。"),
                         );
                     }
+                }
+            }
+            Ok(CoreEvent::MonitorData {
+                session: event_session,
+                bytes,
+                timestamp,
+                dropped_bytes,
+                dropped_burst_bytes,
+            }) => {
+                if session
+                    .as_ref()
+                    .is_some_and(|opened| opened.id == event_session && opened.monitor.is_some())
+                {
+                    emit(
+                        "serial_data",
+                        json!({"direction": "tx", "timestamp": timestamp, "bytes": hex(&bytes), "droppedBytes": dropped_bytes, "droppedBurstBytes": dropped_burst_bytes}),
+                    );
+                    if dropped_burst_bytes > 0 {
+                        emit_error(
+                            "backpressure",
+                            format!("UI 消费过慢，本次丢弃 {dropped_burst_bytes} 字节；累计 {dropped_bytes} 字节。"),
+                        );
+                    }
+                }
+            }
+            Ok(CoreEvent::PeriodicTx {
+                session: event_session,
+                bytes,
+                timestamp,
+            }) => {
+                if session
+                    .as_ref()
+                    .is_some_and(|opened| opened.id == event_session && opened.monitor.is_none())
+                {
+                    emit(
+                        "serial_data",
+                        json!({"direction": "tx", "timestamp": timestamp, "bytes": hex(&bytes)}),
+                    );
+                }
+            }
+            Ok(CoreEvent::PeriodicFault {
+                session: event_session,
+                message,
+            }) => {
+                if session
+                    .as_ref()
+                    .is_some_and(|opened| opened.id == event_session)
+                {
+                    stop_periodic(periodic.take());
+                    emit_error("periodic_write_failed", message);
+                    emit("periodic_state", json!({"active": false}));
                 }
             }
             Ok(CoreEvent::SerialFault {
@@ -572,8 +884,11 @@ fn main() {
                     .as_ref()
                     .is_some_and(|opened| opened.id == event_session)
                 {
-                    periodic = None;
+                    stop_periodic(periodic.take());
                     if let Some(opened) = session.take() {
+                        if opened.monitor.is_some() {
+                            emit("monitor_state", json!({"active": false}));
+                        }
                         close_session(opened);
                     }
                     emit_error("read_failed", message);
@@ -582,16 +897,32 @@ fn main() {
                     scan_ports();
                 }
             }
+            Ok(CoreEvent::MonitorFault {
+                session: event_session,
+                message,
+            }) => {
+                if session
+                    .as_ref()
+                    .is_some_and(|opened| opened.id == event_session)
+                {
+                    stop_periodic(periodic.take());
+                    if let Some(opened) = session.take() {
+                        if opened.monitor.is_some() {
+                            emit("monitor_state", json!({"active": false}));
+                        }
+                        close_session(opened);
+                    }
+                    emit_error("monitor_failed", message);
+                    emit_state("error", None);
+                    emit_state("disconnected", None);
+                    scan_ports();
+                }
+            }
             Ok(CoreEvent::InputClosed) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
-        if periodic
-            .as_ref()
-            .is_some_and(|job| Instant::now() >= job.next_due)
-        {
-            run_periodic_send(&mut periodic, &mut session);
-        }
     }
+    stop_periodic(periodic.take());
     if let Some(opened) = session.take() {
         close_session(opened);
     }
@@ -599,7 +930,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{flow_control, parity, parse_hex, payload_hex_commands};
+    use super::{flow_control, parity, parse_hex, payload_hex_commands, virtual_port_name};
     use serde_json::json;
     use serialport::{FlowControl, Parity};
 
@@ -630,6 +961,13 @@ mod tests {
         assert_eq!(parity("odd").unwrap(), Parity::Odd);
         assert_eq!(flow_control("rts_cts").unwrap(), FlowControl::Hardware);
         assert!(parity("mark").is_err());
+    }
+
+    #[test]
+    fn accepts_only_normalized_virtual_com_names() {
+        assert_eq!(virtual_port_name("com50").unwrap(), "COM50");
+        assert!(virtual_port_name("COM0").is_err());
+        assert!(virtual_port_name("bridge").is_err());
     }
 
     #[test]

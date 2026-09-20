@@ -1,7 +1,7 @@
 name: hcom
-description: HCOM UART debugging assistant for Windows.
+description: HPCOM UART debugging assistant for Windows.
 publish_to: none
-version: 0.3.2+3
+version: 1.0.0+1
 
 environment:
   sdk: ^3.4.0
@@ -12,7 +12,6 @@ dependencies:
   bitsdojo_window: ^0.1.6
   crypto: ^3.0.7
   file_selector: ^1.0.3
-  flutter_svg: ^2.2.4
   shared_preferences: ^2.5.3
 
 dev_dependencies:
@@ -23,8 +22,7 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - Image/LOGO.png
-    - Image/未命名的设计.svg
+    - Image/HPCOMLOGOtouming.png
   fonts:
     - family: Cascadia Code
       fonts:

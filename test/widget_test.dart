@@ -9,13 +9,14 @@ import 'package:hcom/models/serial_entry.dart';
 import 'package:hcom/models/time_zone.dart';
 import 'package:hcom/screens/workbench_screen.dart';
 import 'package:hcom/theme/hcom_theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   testWidgets('renders the UART workbench and its in-stream clear action',
       (tester) async {
     await tester.pumpWidget(const HcomApp());
 
-    expect(find.text('HCOM 调试助手'), findsOneWidget);
+    expect(find.text('HPCom 调试助手'), findsOneWidget);
     expect(find.text('HEX 原始'), findsOneWidget);
     expect(find.text('统计'), findsNothing);
     expect(find.text('时间轴'), findsNothing);
@@ -73,22 +74,30 @@ void main() {
   });
 
   testWidgets('opens the about page from settings', (tester) async {
+    tester.view.physicalSize = const Size(1280, 820);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const HcomApp());
 
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('关于 HCOM'));
+    await tester.ensureVisible(find.text('关于 HPCom'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('关于 HCOM'));
+    await tester.tap(find.text('关于 HPCom'));
     await tester.pumpAndSettle();
 
-    expect(find.text('HCOM 串口调试助手'), findsOneWidget);
-    expect(find.text('版本 0.3.2'), findsAtLeastNWidgets(1));
+    expect(find.text('HPCom 串口调试助手'), findsOneWidget);
+    expect(find.text('版本 1.0.0'), findsAtLeastNWidgets(1));
     expect(find.text('Tylenoler'), findsOneWidget);
     expect(find.text('github.com/Tylenoler/HCOM'), findsOneWidget);
     expect(find.text('© 2026 Tylenoler'), findsOneWidget);
     expect(find.text('开发构建'), findsOneWidget);
     expect(find.text('未打包'), findsOneWidget);
+    final aboutSurface = tester.getRect(
+        find.byKey(const ValueKey('container-transform-surface')).last);
+    expect(aboutSurface.width, lessThan(1280));
+    expect(aboutSurface.height, lessThan(820));
   });
 
   testWidgets('calculates and returns a complete integrity frame',
@@ -115,36 +124,23 @@ void main() {
     expect(returnedFrame, '31 32 33 34 35 36 37 38 39 37 4B');
   });
 
-  testWidgets('keeps the floating integrity panel state after minimizing',
+  testWidgets('keeps the integrity calculator in the right Dock',
       (tester) async {
+    tester.view.physicalSize = const Size(1280, 820);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const HcomApp());
 
     await tester.tap(find.byTooltip('打开校验模块'));
     await tester.pumpAndSettle();
-    expect(find.text('校验模块'), findsOneWidget);
+    expect(find.text('校验'), findsAtLeastNWidgets(2));
 
     const source = '31 32 33 34 35 36 37 38 39';
     const frame = '$source 37 4B';
     await tester.enterText(
         find.byKey(const ValueKey('crc-calculator-input')), source);
     await tester.pumpAndSettle();
-    expect(find.text(frame), findsOneWidget);
-
-    await tester.tap(find.byTooltip('缩小校验面板'));
-    await tester.pumpAndSettle();
-    expect(find.text('校验模块'), findsNothing);
-
-    await tester.tap(find.byTooltip('打开校验模块'));
-    await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<TextField>(
-            find.byKey(const ValueKey('crc-calculator-input')),
-          )
-          .controller!
-          .text,
-      source,
-    );
     expect(find.text(frame), findsOneWidget);
 
     await tester.ensureVisible(find.text('填入主发送框'));
@@ -158,30 +154,33 @@ void main() {
           .text,
       frame,
     );
-  });
-
-  testWidgets('keeps the floating integrity panel inside the main window',
-      (tester) async {
-    tester.view.physicalSize = const Size(1280, 820);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(const HcomApp());
 
     await tester.tap(find.byTooltip('打开校验模块'));
     await tester.pumpAndSettle();
-    final panel = find.byKey(const ValueKey('integrity-calculator-window'));
+    expect(find.byKey(const ValueKey('integrity-calculator-window')),
+        findsNothing);
+  });
 
-    await tester.drag(find.text('校验模块'), const Offset(-2000, -2000));
-    await tester.pumpAndSettle();
-    expect(tester.getTopLeft(panel).dx, greaterThanOrEqualTo(12));
-    expect(tester.getTopLeft(panel).dy, greaterThanOrEqualTo(12));
+  testWidgets('shows only in-scope Dock modules', (tester) async {
+    await tester.pumpWidget(const HcomApp());
 
-    await tester.drag(find.text('校验模块'), const Offset(4000, 4000));
-    await tester.pumpAndSettle();
-    final bounds = tester.getRect(panel);
-    expect(bounds.right, lessThanOrEqualTo(1280 - 12));
-    expect(bounds.bottom, lessThanOrEqualTo(820 - 12));
+    for (final unusedModule in [
+      'CAN',
+      'CAN-FD',
+      'I2C',
+      'TCP',
+      '虚拟串口',
+      '时序',
+      '信号',
+      '抓包',
+      '插件',
+      '帧监听',
+    ]) {
+      expect(find.text(unusedModule), findsNothing);
+    }
+    expect(find.text('UART'), findsOneWidget);
+    expect(find.text('字段'), findsOneWidget);
+    expect(find.text('校验'), findsAtLeastNWidgets(1));
   });
 
   testWidgets('updates the selected baud rate while disconnected',
@@ -195,6 +194,29 @@ void main() {
     await tester.tap(find.text('9600'));
     await tester.pumpAndSettle();
     expect(find.text('9600'), findsOneWidget);
+  });
+
+  testWidgets('adds a custom baud rate from the port configuration',
+      (tester) async {
+    await tester.pumpWidget(const HcomApp());
+
+    await tester.tap(find.byTooltip('添加自定义波特率'));
+    await tester.pumpAndSettle();
+    final dialogSurface = tester.getRect(
+      find.byKey(const ValueKey('container-transform-surface')).last,
+    );
+    expect(dialogSurface.width, 420);
+    expect(dialogSurface.height, 280);
+    await tester.enterText(
+        find.byKey(const ValueKey('custom-baud-rate-input')), '123456');
+    await tester.tap(find.text('保存').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('123456'), findsOneWidget);
+
+    final preferences = await SharedPreferences.getInstance();
+    expect(preferences.getStringList('customBaudRates'), contains('123456'));
+    expect(preferences.getString('selectedBaudRate'), '123456');
   });
 
   testWidgets('collapses port configuration and keeps a compact send bar',
@@ -395,7 +417,7 @@ void main() {
       (tester) async {
     await tester.pumpWidget(const HcomApp());
 
-    final context = tester.element(find.text('HCOM 调试助手'));
+    final context = tester.element(find.text('HPCom 调试助手'));
     expect(Theme.of(context).textTheme.bodyMedium!.fontFamilyFallback,
         contains(HcomTheme.chineseFontFamily));
     expect(Theme.of(context).textTheme.bodyMedium!.fontFamily,
@@ -403,10 +425,24 @@ void main() {
   });
 
   testWidgets('opens the persisted log time-zone setting', (tester) async {
+    tester.view.physicalSize = const Size(1280, 820);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const HcomApp());
 
     await tester.tap(find.byTooltip('设置'));
     await tester.pumpAndSettle();
+    final settingsCenter = tester.getCenter(find.byType(AlertDialog).first);
+    expect(settingsCenter.dx, closeTo(640, 1));
+    expect(settingsCenter.dy, closeTo(410, 1));
+    final settingsBounds = tester.getRect(find.byType(AlertDialog).first);
+    expect(settingsBounds.width, lessThan(1280));
+    expect(settingsBounds.height, lessThan(820));
+    final modalSurface = tester
+        .getRect(find.byKey(const ValueKey('container-transform-surface')));
+    expect(modalSurface.width, lessThan(1280));
+    expect(modalSurface.height, lessThan(820));
     expect(find.text('日志时间时区'), findsOneWidget);
     expect(find.text('UTC+08:00（中国标准时间）'), findsOneWidget);
     expect(find.text('启动默认值'), findsOneWidget);
@@ -568,16 +604,16 @@ void main() {
     expect(txt, '26-09-11 20:38:53.175 RX(HEX)\nAA 55 A0 00\n');
   });
 
-  test('automatically splits a transport batch by the learned packet length',
+  test(
+      'default template-length framing is deterministic across transport reads',
       () {
-    final framer = ReceiveFramer();
+    final framer =
+        ReceiveFramer(FrameTemplate.standard().receiveFramingConfig());
     final time = DateTime.utc(2026, 9, 12, 8, 38, 41);
-    for (var index = 0; index < 3; index++) {
-      expect(framer.addHex('01 02 03 04', time), hasLength(1));
-    }
-
-    final frames = framer.addHex('AA 55 55 AA 10 20 30 40', time);
-    expect(frames.map((frame) => frame.hex), ['AA 55 55 AA', '10 20 30 40']);
+    expect(framer.addHex('AA 55 03 10', time), isEmpty);
+    final frames = framer.addHex('20 30 62 0D AA 55 00 57 0D', time);
+    expect(frames.map((frame) => frame.hex),
+        ['AA 55 03 10 20 30 62 0D', 'AA 55 00 57 0D']);
   });
 
   test('fixed-length framing spans arbitrary transport reads', () {

@@ -433,6 +433,71 @@ class FrameTemplate {
           name: name ?? this.name,
           fields: fields ?? this.fields);
 
+  /// Derives deterministic stream framing from this editable template. The
+  /// length field denotes the payload; every non-payload field is added back
+  /// to obtain the whole-frame byte count.
+  ReceiveFramingConfig receiveFramingConfig({
+    ReceiveFramingMode mode = ReceiveFramingMode.templateLength,
+  }) {
+    ProtocolField? header;
+    ProtocolField? length;
+    ProtocolField? trailer;
+    var fixedBytes = 0;
+    var offset = 0;
+    var headerOffset = 0;
+    var lengthOffset = 0;
+    for (final field in fields) {
+      final size = field.byteLength.clamp(0, 4096);
+      if (field.kind == ProtocolFieldKind.header && header == null) {
+        header = field;
+        headerOffset = offset;
+      }
+      if (field.kind == ProtocolFieldKind.length && length == null) {
+        length = field;
+        lengthOffset = offset;
+      }
+      if (field.kind == ProtocolFieldKind.trailer && trailer == null) {
+        trailer = field;
+      }
+      if (field.kind != ProtocolFieldKind.payload) {
+        fixedBytes += size;
+        offset += size;
+      }
+    }
+    if (header == null || length == null) {
+      throw FormatException('模板“$name”缺少帧头或长度字段，无法用于长度字段分帧。');
+    }
+    final headerBytes = tryParseHexBytes(header.valueHex);
+    if (!headerBytes.isValid || headerBytes.bytes.length != header.byteLength) {
+      throw FormatException(
+          '模板“$name”的帧头 HEX 无效或长度不匹配：${headerBytes.error ?? ''}');
+    }
+    final validatedTrailer = trailer;
+    final trailerBytes = validatedTrailer == null
+        ? null
+        : tryParseHexBytes(validatedTrailer.valueHex);
+    if (trailerBytes != null &&
+        (!trailerBytes.isValid ||
+            trailerBytes.bytes.length != validatedTrailer!.byteLength)) {
+      throw FormatException(
+          '模板“$name”的帧尾 HEX 无效或长度不匹配：${trailerBytes.error ?? ''}');
+    }
+    return ReceiveFramingConfig(
+      mode: mode,
+      headerHex: header.valueHex,
+      trailerHex: trailer?.valueHex ?? '',
+      lengthField: LengthFieldFramingConfig(
+        headerHex: header.valueHex,
+        headerOffset: headerOffset,
+        lengthOffset: lengthOffset,
+        lengthBytes: length.byteLength.clamp(1, 4),
+        littleEndian: length.byteOrder == ByteOrder.littleEndian,
+        lengthAdjustment: fixedBytes,
+        trailerHex: trailer?.valueHex ?? '',
+      ),
+    );
+  }
+
   Map<String, dynamic> toJson() => {
         'version': 1,
         'id': id,
@@ -445,7 +510,7 @@ class FrameTemplate {
   factory FrameTemplate.decode(String source) {
     final json = jsonDecode(source);
     if (json is! Map<String, dynamic> || json['fields'] is! List) {
-      throw const FormatException('不是有效的 HCOM 帧模板 JSON。');
+      throw const FormatException('不是有效的 HPCOM 帧模板 JSON。');
     }
     final fields = (json['fields'] as List)
         .whereType<Map>()
@@ -484,11 +549,12 @@ class ProtocolFrameParser {
   final FrameTemplate template;
 
   ParsedFrame parseHex(String hex) {
-    final bytes = parseHexBytes(hex);
-    if (bytes.isEmpty) {
+    final input = tryParseHexBytes(hex);
+    if (!input.isValid) {
       return const ParsedFrame(
           fields: [], valid: false, error: '没有可解析的 HEX 字节。');
     }
+    final bytes = input.bytes;
     var offset = 0;
     int? payloadLength;
     final parsed = <ParsedField>[];
@@ -509,7 +575,14 @@ class ProtocolFrameParser {
       if ((field.kind == ProtocolFieldKind.header ||
               field.kind == ProtocolFieldKind.trailer) &&
           field.valueHex.isNotEmpty) {
-        final expected = parseHexBytes(field.valueHex);
+        final expectedInput = tryParseHexBytes(field.valueHex);
+        if (!expectedInput.isValid) {
+          return ParsedFrame(
+              fields: parsed,
+              valid: false,
+              error: '${field.name} 的模板 HEX 无效：${expectedInput.error}');
+        }
+        final expected = expectedInput.bytes;
         if (!_sameBytes(chunk, expected)) {
           return ParsedFrame(
               fields: parsed,

@@ -23,8 +23,14 @@ class BackendBridge {
           .transform(utf8.decoder)
           .transform(const LineSplitter())
           .listen(_handleLine);
-      unawaited(_process!.exitCode.then((_) => stop()));
-      send('hello', {'client': 'flutter', 'protocolVersion': 1});
+      unawaited(_process!.exitCode.then((_) async {
+        // The child has already exited; only detach streams. Calling stop()
+        // here would otherwise try to kill an unrelated replacement process.
+        await _stdoutSubscription?.cancel();
+        _stdoutSubscription = null;
+        _process = null;
+      }));
+      send('hello', {'client': 'flutter', 'protocolVersion': 2});
       return true;
     } on ProcessException {
       _process = null;
@@ -57,11 +63,24 @@ class BackendBridge {
   }
 
   Future<void> stop() async {
-    await _stdoutSubscription?.cancel();
-    _stdoutSubscription = null;
     final process = _process;
     _process = null;
-    process?.kill();
+    if (process == null) return;
+    // Close stdin first: Core treats EOF as a shutdown command, closes the
+    // serial handle, and joins its reader. This prevents an orphan process
+    // retaining COM ports when the Flutter window exits.
+    process.stdin.writeln(jsonEncode({'command': 'close_port', 'payload': {}}));
+    await process.stdin.close();
+    try {
+      await process.exitCode.timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      process.kill();
+      await process.exitCode
+          .timeout(const Duration(seconds: 1), onTimeout: () => -1);
+    } finally {
+      await _stdoutSubscription?.cancel();
+      _stdoutSubscription = null;
+    }
   }
 
   Future<void> dispose() async {

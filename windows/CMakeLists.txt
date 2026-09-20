@@ -4,7 +4,7 @@ project(hcom LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
-set(BINARY_NAME "hcom")
+set(BINARY_NAME "HPCom")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -73,14 +73,30 @@ set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
 set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 
 # Build the Rust Core whenever its source has changed, then deploy it beside
-# hcom.exe so a Flutter-only build can never package a stale Core executable.
+# HPCom.exe so a Flutter-only build can never package a stale Core executable.
 set(HCOM_CORE_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/../core/Cargo.toml")
 set(HCOM_CORE_EXECUTABLE "${CMAKE_CURRENT_SOURCE_DIR}/../core/target/release/hcom-core.exe")
+set(HCOM_CARGO_EXECUTABLE "" CACHE FILEPATH
+  "Path to the Cargo executable used to build the HCOM Rust Core")
+if(NOT HCOM_CARGO_EXECUTABLE)
+  if(EXISTS "D:/HCOM-Rust/cargo/bin/cargo.exe")
+    set(HCOM_CARGO_EXECUTABLE "D:/HCOM-Rust/cargo/bin/cargo.exe" CACHE FILEPATH
+      "Path to the Cargo executable used to build the HCOM Rust Core" FORCE)
+  endif()
+endif()
+if(NOT HCOM_CARGO_EXECUTABLE)
+  find_program(HCOM_CARGO_EXECUTABLE NAMES cargo
+    HINTS "D:/HCOM-Rust/cargo/bin")
+endif()
+if(NOT HCOM_CARGO_EXECUTABLE)
+  message(FATAL_ERROR
+    "Cargo was not found. Set HCOM_CARGO_EXECUTABLE or install Rust/Cargo.")
+endif()
 file(GLOB_RECURSE HCOM_CORE_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/../core/src/*.rs")
 add_custom_command(
   OUTPUT "${HCOM_CORE_EXECUTABLE}"
-  COMMAND cargo build --release --manifest-path "${HCOM_CORE_MANIFEST}"
+  COMMAND "${HCOM_CARGO_EXECUTABLE}" build --release --manifest-path "${HCOM_CORE_MANIFEST}"
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
   DEPENDS "${HCOM_CORE_MANIFEST}"
           "${CMAKE_CURRENT_SOURCE_DIR}/../core/Cargo.lock"

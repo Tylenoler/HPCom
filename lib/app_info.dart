@@ -1,7 +1,7 @@
 /// Keep this aligned with pubspec.yaml using Semantic Versioning.
-const applicationVersion = '0.3.2';
-const coreVersion = '0.2.0';
-const protocolVersion = 'v1';
+const applicationVersion = '1.0.0';
+const coreVersion = '0.3.0';
+const protocolVersion = 'v2';
 
 /// Supplied by the release script. Development runs deliberately show a
 /// visible marker instead of pretending to be a packaged release.

@@ -108,7 +108,11 @@ class CoreHarness {
           txBytes += n;
         }
         final dropped = ev.payload['droppedBytes'];
-        if (dropped is int && dropped > 0) droppedBytes += dropped;
+        // Core v2 reports a monotonic cumulative counter. Summing repeated
+        // snapshots would turn one loss incident into many fictional losses.
+        if (dropped is num && dropped >= droppedBytes) {
+          droppedBytes = dropped.toInt();
+        }
       case 'error':
         errorCount++;
         final code = ev.payload['code'];
@@ -165,7 +169,7 @@ class CoreHarness {
   Future<Map<String, dynamic>> handshake() async {
     final ev = await sendAndWait(
       'hello',
-      <String, dynamic>{'client': 'perftest', 'protocolVersion': 1},
+      <String, dynamic>{'client': 'perftest', 'protocolVersion': 2},
       (e) => e.event == 'ready',
     );
     return ev.payload;
@@ -215,6 +219,39 @@ class CoreHarness {
     return t1 - t0;
   }
 
+  Future<int> openMonitor(
+    String port,
+    String virtualPort, {
+    int baudRate = 115200,
+    int dataBits = 8,
+    int stopBits = 1,
+    String parity = 'none',
+    String flowControl = 'none',
+  }) async {
+    final t0 = DateTime.now().microsecondsSinceEpoch;
+    final ev = await sendAndWait(
+      'open_monitor',
+      <String, dynamic>{
+        'port': port,
+        'virtualPort': virtualPort,
+        'baudRate': baudRate,
+        'dataBits': dataBits,
+        'stopBits': stopBits,
+        'parity': parity,
+        'flowControl': flowControl,
+      },
+      (e) =>
+          e.event == 'connection_state' &&
+          (e.payload['state'] == 'connected' || e.payload['state'] == 'error'),
+      timeout: const Duration(seconds: 8),
+    );
+    final t1 = DateTime.now().microsecondsSinceEpoch;
+    if (ev.payload['state'] != 'connected') {
+      throw StateError('启动旁路监听 $port → $virtualPort 失败: ${ev.payload}');
+    }
+    return t1 - t0;
+  }
+
   Future<int> closePort() async {
     final t0 = DateTime.now().microsecondsSinceEpoch;
     await sendAndWait(
@@ -232,14 +269,17 @@ class CoreHarness {
       send('write_data', <String, dynamic>{'bytes': hex});
 
   Future<void> stop() async {
+    send('close_port');
     try {
-      _proc.stdin.close();
+      await _proc.stdin.close();
     } catch (_) {}
-    await Future<void>.delayed(const Duration(milliseconds: 100));
     try {
-      _proc.kill();
+      await _proc.exitCode.timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      try {
+        _proc.kill();
+      } catch (_) {}
     } catch (_) {}
-    await Future<void>.delayed(const Duration(milliseconds: 100));
     try {
       await _events.close();
     } catch (_) {}

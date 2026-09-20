@@ -15,7 +15,7 @@ Future<void> main() async {
       ..minSize = const Size(600, 480)
       ..size = initialSize
       ..alignment = Alignment.center
-      ..title = 'HCOM 调试助手'
+      ..title = 'HPCom 调试助手'
       ..show();
   });
 }
@@ -52,7 +52,7 @@ class _HcomAppState extends State<HcomApp> {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'HCOM 调试助手',
+        title: 'HPCom 调试助手',
         debugShowCheckedModeBanner: false,
         theme: HcomTheme.light(),
         darkTheme: HcomTheme.dark(),

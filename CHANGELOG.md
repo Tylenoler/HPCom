@@ -7,6 +7,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-20
+
+### Changed
+
+- Renamed the Windows application and executable to HPCom.
+- Updated the product logo, Windows icon, taskbar icon, and theme-aware in-app mark.
+- Published the first public Windows x64 release package and bilingual usage guide.
+
+## [0.4.0] - 2026-09-13
+
+### Added
+
+- Added a dedicated virtual-COM relay mode: HCOM owns the physical COM port, forwards data between it and a named virtual COM endpoint, and records both directions in the unified stream.
+- Added the HCOM-owned KMDF virtual-COM control protocol for creating named virtual port pairs from the workbench; formal releases will bundle only the Microsoft-signed HCOM driver package.
+- Added IPC v2 commands and events for relay creation/state plus a Core-owned periodic scheduling worker.
+
+### Changed
+
+- Periodic sending now runs on an independent Rust thread and uses a shared serialized write path, rather than being timed by the Core event loop.
+- Relay mode rejects HCOM manual and periodic writes so the external program remains the only virtual-port writer.
+
 ## [0.3.2] - 2026-09-12
 
 ### Fixed
@@ -44,7 +65,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Windows UART/COM workbench, connection workflow, send queue, receive framing, and logging.
 
-[Unreleased]: https://github.com/Tylenoler/HCOM/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/Tylenoler/HCOM/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Tylenoler/HCOM/compare/v0.4.0...v1.0.0
+[0.4.0]: https://github.com/Tylenoler/HCOM/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/Tylenoler/HCOM/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Tylenoler/HCOM/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Tylenoler/HCOM/compare/v0.2.0...HEAD

@@ -1,0 +1,48 @@
+; HCOM self-owned virtual COM bus driver.
+; CatalogFile is produced by Inf2Cat during the WDK package step.
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Ports
+ClassGuid={4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider=%HCOM%
+CatalogFile=hcom-vcom.cat
+DriverVer=09/13/2026,0.1.0.0
+PnpLockdown=1
+
+[Manufacturer]
+%HCOM%=HcomModels,NTamd64
+
+[HcomModels.NTamd64]
+%HcomVcom.DeviceDesc%=HcomVcom_Install,ROOT\HCOMVCOM
+
+[HcomVcom_Install.NT]
+CopyFiles=HcomVcom_CopyFiles
+
+[HcomVcom_CopyFiles]
+hcom-vcom.sys
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+hcom-vcom.sys=1
+
+[DestinationDirs]
+HcomVcom_CopyFiles=12
+
+[HcomVcom_Install.NT.Services]
+AddService=hcom-vcom,0x00000002,HcomVcom_Service
+
+[HcomVcom_Service]
+DisplayName=%HcomVcom.ServiceDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\hcom-vcom.sys
+
+[Strings]
+HCOM="HCOM"
+DiskName="HCOM Virtual COM Driver Installation Disk"
+HcomVcom.DeviceDesc="HCOM Virtual COM Bus"
+HcomVcom.ServiceDesc="HCOM Virtual COM Driver"

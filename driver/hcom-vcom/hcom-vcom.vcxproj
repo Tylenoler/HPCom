@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{DF6E1C07-7517-4A79-BBA6-EF9F919B0C77}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>HcomVcom</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <WindowsSdkDir Condition="'$(WindowsSdkDir)'==''">C:\Program Files (x86)\Windows Kits\10\</WindowsSdkDir>
+    <WDKContentRoot Condition="'$(WDKContentRoot)'==''">$(WindowsSdkDir)</WDKContentRoot>
+    <WDKBuildFolder>$(WindowsTargetPlatformVersion)\</WDKBuildFolder>
+    <TargetVersion>Windows10</TargetVersion>
+    <_NT_TARGET_VERSION>0xA000010</_NT_TARGET_VERSION>
+    <Valid_NTTARGETVERSIONS>0xA000010</Valid_NTTARGETVERSIONS>
+    <MatchingSdkPresent>true</MatchingSdkPresent>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Driver</ConfigurationType><DriverType>KMDF</DriverType><PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Driver</ConfigurationType><DriverType>KMDF</DriverType><PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="$(WindowsSdkDir)build\$(WindowsTargetPlatformVersion)\WindowsDriver.Default.props" />
+  <Import Project="$(WindowsSdkDir)build\$(WindowsTargetPlatformVersion)\WindowsDriver.KernelMode.props" />
+  <PropertyGroup>
+    <!-- Desktop v143 sets this after its default props; kernel drivers cannot
+         carry an application manifest. -->
+    <GenerateManifest>false</GenerateManifest>
+    <!-- Local builds produce unsigned artifacts. Test certificates and
+         production certificates must never be embedded in this project. -->
+    <SignMode>Off</SignMode>
+    <TargetVersion>Windows10</TargetVersion><KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR><KMDF_VERSION_MINOR>35</KMDF_VERSION_MINOR>
+    <OutDir>$(ProjectDir)out\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)out\$(Platform)\$(Configuration)\obj\</IntDir>
+    <TargetName>hcom-vcom</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <!-- WDF 1.35 itself emits C4324 declarations on x64. -->
+      <DisableSpecificWarnings>4324</DisableSpecificWarnings>
+      <PreprocessorDefinitions>_AMD64_;_WIN64;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- The Desktop v143 toolset does not import WDK paths automatically. -->
+      <AdditionalIncludeDirectories>$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\km;$(WindowsSdkDir)Include\$(WindowsTargetPlatformVersion)\shared;$(WindowsSdkDir)Include\wdf\kmdf\1.35;$(ProjectDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <StringPooling>true</StringPooling>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <ExceptionHandling>false</ExceptionHandling>
+    </ClCompile>
+    <Link>
+      <Driver>Driver</Driver>
+      <GenerateManifest>false</GenerateManifest>
+      <AdditionalLibraryDirectories>$(WindowsSdkDir)Lib\$(WindowsTargetPlatformVersion)\km\x64;$(WindowsSdkDir)Lib\wdf\kmdf\x64\1.35;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>ntoskrnl.lib;hal.lib;wmilib.lib;wdmsec.lib;WdfLdr.lib;WdfDriverEntry.lib;BufferOverflowFastFailK.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="src\hcom_vcom.c" /><ClInclude Include="include\hcom_vcom_public.h" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="$(WindowsSdkDir)build\$(WindowsTargetPlatformVersion)\WindowsDriver.Common.targets" />
+</Project>

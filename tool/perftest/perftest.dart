@@ -4,6 +4,7 @@
 //   dart run tool/perftest/perftest.dart
 //   dart run tool/perftest/perftest.dart --writer COM29 --reader COM30
 //   dart run tool/perftest/perftest.dart --quick
+//   dart run tool/perftest/perftest.dart --relay-external COM50 --relay-monitor COM51
 //
 // 设计说明：
 //  * 直接驱动真实 hcom-core.exe（NDJSON over stdio），不修改本体代码。
@@ -33,6 +34,8 @@ class Config {
   int soakStatusIntervalSeconds = 60;
   int reconnectIntervalSeconds = 0;
   int pingSamples = 300;
+  String? relayExternal;
+  String? relayMonitor;
   bool quick = false;
 
   static Config parse(List<String> args) {
@@ -57,6 +60,8 @@ class Config {
     c.reconnectIntervalSeconds =
         int.tryParse(val('reconnect-interval') ?? '') ??
             c.reconnectIntervalSeconds;
+    c.relayExternal = val('relay-external');
+    c.relayMonitor = val('relay-monitor');
     c.quick = args.contains('--quick');
     if (c.quick) {
       c.throughputSeconds = 3;
@@ -68,6 +73,12 @@ class Config {
     }
     return c;
   }
+
+  bool get relayConfigured =>
+      relayExternal != null &&
+      relayExternal!.isNotEmpty &&
+      relayMonitor != null &&
+      relayMonitor!.isNotEmpty;
 }
 
 // ============================================================
@@ -470,6 +481,105 @@ Future<TestReport> testLatency(
   return r;
 }
 
+/// T9 在同一真实串口回环和同一个回显 Core 上，先测直连，再测虚拟
+/// COM + HCOM 旁路中继。只有用户显式提供一对已创建的虚拟端口才会运行。
+Future<TestReport> testRelayDelta(
+    CoreHarness directOrMonitor, CoreHarness echo, Config cfg) async {
+  final r = TestReport('T9', '直连 vs 旁路中继额外延迟', '旁路性能');
+  final sw = Stopwatch()..start();
+  if (!cfg.relayConfigured) {
+    r.status = Status.skip;
+    r.note('需要 --relay-external COMx --relay-monitor COMy（已创建的虚拟端口对）');
+    r.verdict = '未配置真实链路与虚拟端口对，不能生成可信的延迟差值';
+    r.elapsed = sw.elapsed;
+    return r;
+  }
+
+  final echoSub = echo.events.listen((event) {
+    if (event.event == 'serial_data' && event.payload['direction'] == 'rx') {
+      final bytes = event.payload['bytes'];
+      if (bytes is String && bytes.isNotEmpty) echo.writeHex(bytes);
+    }
+  });
+
+  Future<List<int>> sample(CoreHarness probe) async {
+    final samples = <int>[];
+    for (var i = 0; i < cfg.latencySamples; i++) {
+      final received = probe.nextWhere(
+        (event) =>
+            event.event == 'serial_data' && event.payload['direction'] == 'rx',
+        timeout: const Duration(seconds: 3),
+      );
+      final t0 = DateTime.now().microsecondsSinceEpoch;
+      probe.writeHex(buildFrame(0x9000 + i, 8));
+      await received;
+      samples.add(DateTime.now().microsecondsSinceEpoch - t0);
+    }
+    samples.sort();
+    return samples;
+  }
+
+  CoreHarness? external;
+  try {
+    // cfg.writer <-> cfg.reader is a physical pair or a real device plus its
+    // echo peer. `echo` stays open for both phases so only the relay changes.
+    final direct = await sample(directOrMonitor);
+    await directOrMonitor.closePort();
+
+    await directOrMonitor.openMonitor(cfg.writer, cfg.relayMonitor!,
+        baudRate: cfg.baud);
+    external = await CoreHarness.start(locateCore()!);
+    await external.handshake();
+    await external.openPort(cfg.relayExternal!, baudRate: cfg.baud);
+    final relayed = await sample(external);
+
+    double ms(List<int> values, double p) => percentile(values, p) / 1000;
+    final directP50 = ms(direct, .50);
+    final directP95 = ms(direct, .95);
+    final directP99 = ms(direct, .99);
+    final relayP50 = ms(relayed, .50);
+    final relayP95 = ms(relayed, .95);
+    final relayP99 = ms(relayed, .99);
+    String delta(double value) =>
+        '${value >= 0 ? '+' : ''}${value.toStringAsFixed(3)} ms';
+
+    r.metric('样本数', '${direct.length} / ${relayed.length}', '直连 / 中继');
+    r.metric('直连 P50 / P95 / P99',
+        '${directP50.toStringAsFixed(3)} / ${directP95.toStringAsFixed(3)} / ${directP99.toStringAsFixed(3)} ms');
+    r.metric('中继 P50 / P95 / P99',
+        '${relayP50.toStringAsFixed(3)} / ${relayP95.toStringAsFixed(3)} / ${relayP99.toStringAsFixed(3)} ms');
+    r.metric('额外 P50', delta(relayP50 - directP50));
+    r.metric('额外 P95', delta(relayP95 - directP95));
+    r.metric('额外 P99', delta(relayP99 - directP99));
+    r.metric('中继 UI 丢弃字节', '${directOrMonitor.droppedBytes}');
+    r.metric('外部端 UI 丢弃字节', '${external.droppedBytes}');
+    final p99Delta = relayP99 - directP99;
+    final drops = directOrMonitor.droppedBytes + external.droppedBytes;
+    r.status =
+        drops > 0 ? Status.fail : (p99Delta < 5 ? Status.pass : Status.warn);
+    r.verdict = drops > 0
+        ? '出现 UI 队列背压丢弃，结果不可作为零丢包结论'
+        : '同链路差值已测得；P99 额外延迟 ${delta(p99Delta)}';
+    r.note('该结果包含设备/回显端与 USB 驱动行为；只用“中继 - 直连”作为 HCOM 额外开销参考。');
+  } catch (error) {
+    r.status = Status.skip;
+    r.note('旁路对比无法完成: $error');
+    r.verdict = '请确认物理回环、虚拟端口对均未被其他程序占用';
+  } finally {
+    try {
+      await external?.closePort();
+    } catch (_) {}
+    await external?.stop();
+    try {
+      await directOrMonitor.closePort();
+    } catch (_) {}
+    await echoSub.cancel();
+  }
+  sw.stop();
+  r.elapsed = sw.elapsed;
+  return r;
+}
+
 /// T6 定时发送精度（宿主侧调度）
 Future<TestReport> testTimer(CoreHarness writer, Config cfg) async {
   final r = TestReport('T6', '定时发送调度精度', '时序精度');
@@ -515,7 +625,7 @@ Future<TestReport> testTimer(CoreHarness writer, Config cfg) async {
   r.status =
       maxDevMs < 5 ? Status.pass : (maxDevMs < 20 ? Status.warn : Status.fail);
   r.verdict = maxDevMs < 5 ? '调度精度良好' : '抖动偏大，高精度定时需专用调度';
-  r.note('本项测的是宿主调用侧调度；Core 内的定时发送属于 Phase 4，尚未实现');
+  r.note('本项测的是宿主调用侧调度；Core 内的独立周期线程需通过真实串口另行验收。');
   r.elapsed = sw.elapsed;
   return r;
 }
@@ -637,7 +747,8 @@ Future<TestReport> testSoak(
         writer.writeHex(frame);
       }
       await Future<void>.delayed(paceDelay(cfg, 24 * cfg.frameBytes));
-      if (DateTime.now().isAfter(nextReconnectAt)) {
+      if (cfg.reconnectIntervalSeconds > 0 &&
+          DateTime.now().isAfter(nextReconnectAt)) {
         // Let the bounded Core command queue drain before disconnecting. The
         // receiver closes first so no fresh RX events arrive mid-transition.
         await Future<void>.delayed(const Duration(milliseconds: 800));
@@ -729,6 +840,9 @@ Future<int> main(List<String> args) async {
   stdout.writeln('  模式      : ${cfg.quick ? '快速' : '完整'}');
   stdout.writeln('  回环端口  : ${cfg.writer} <-> ${cfg.reader}');
   stdout.writeln('  波特率    : ${cfg.baud}');
+  if (cfg.relayConfigured) {
+    stdout.writeln('  旁路对比  : ${cfg.relayExternal} <-> ${cfg.relayMonitor}');
+  }
   if (corePath == null) {
     stdout.writeln('');
     stdout.writeln('  ❌ 未找到 hcom-core.exe。请先构建:');
@@ -796,6 +910,9 @@ Future<int> main(List<String> args) async {
     await run(() => testTimer(w!, cfg));
     await run(() => testResources(w!, rd!, cfg));
     await run(() => testSoak(w!, rd!, cfg));
+    // T9 needs to close/reopen the writer as a native monitor, so it runs
+    // after all ordinary direct-port tests and owns final cleanup itself.
+    await run(() => testRelayDelta(w!, rd!, cfg));
     try {
       await w!.closePort();
       await rd!.closePort();
@@ -807,6 +924,7 @@ Future<int> main(List<String> args) async {
       ['T6', '定时发送调度精度', '时序精度'],
       ['T7', 'Core 资源占用', '资源'],
       ['T8', '连续运行稳定性', '稳定性'],
+      ['T9', '直连 vs 旁路中继额外延迟', '旁路性能'],
     ]) {
       final rep = TestReport(spec[0], spec[1], spec[2]);
       rep.status = Status.skip;

@@ -110,12 +110,13 @@ dependencies = [
 
 [[package]]
 name = "hcom-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "serde",
  "serde_json",
  "serialport",
+ "windows-sys",
 ]
 
 [[package]]

@@ -15,8 +15,15 @@ build/
 # Rust
 core/target/
 
+# HCOM VCOM build output and formal signing material are release artifacts,
+# never source-controlled credentials or binaries.
+driver/hcom-vcom/out/
+driver/hcom-vcom/dist/signed/
+
 # Local logs and captures
 *.log
 captures/
+tool/perftest/reports/
+dist/
 # Widget Preview related
 .widget_preview/
