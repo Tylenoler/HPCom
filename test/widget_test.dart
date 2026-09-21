@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hcom/app_info.dart';
 import 'package:hcom/main.dart';
 import 'package:hcom/models/frame_protocol.dart';
 import 'package:hcom/models/log_copy.dart';
@@ -94,7 +95,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('HPCom 串口调试助手'), findsOneWidget);
-    expect(find.text('版本 1.0.0'), findsAtLeastNWidgets(1));
+    // Read the shipped constant instead of a literal so a version bump cannot
+    // silently break this test.
+    expect(find.text('版本 $applicationVersion'), findsAtLeastNWidgets(1));
     expect(find.text('Tylenoler'), findsOneWidget);
     expect(find.text('github.com/Tylenoler/HPCom'), findsOneWidget);
     expect(find.text('© 2026 Tylenoler'), findsOneWidget);

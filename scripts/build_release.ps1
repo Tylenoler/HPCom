@@ -148,7 +148,7 @@ try {
 
     Write-Host "`nBUILD SUCCEEDED" -ForegroundColor Green
     Write-Host "Release: $releaseDirectory"
-    Write-Host "Identity: App 1.0.0 · Core 0.3.0 · IPC v2 · $revision · $buildTime"
+    Write-Host "Identity: App 1.0.1 · Core 0.3.0 · IPC v2 · $revision · $buildTime"
     Write-Host "SHA256: $hashFile"
 }
 finally {

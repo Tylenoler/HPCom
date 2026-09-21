@@ -241,8 +241,7 @@ class ReceiveFramer {
     final header = headerResult.bytes;
     final lengthWidth = rule.lengthBytes.clamp(1, 4);
     final trailerResult = tryParseHexBytes(rule.trailerHex);
-    final trailer =
-        trailerResult.isValid ? trailerResult.bytes : const <int>[];
+    final trailer = trailerResult.isValid ? trailerResult.bytes : const <int>[];
     // The declared value counts payload bytes, so a zero-length payload is a
     // legitimate frame: the smallest possible frame is header + length field +
     // trailer, and a template whose fixed fields are wider than that (checksum
@@ -250,9 +249,10 @@ class ReceiveFramer {
     // double-counts those fixed fields and splits valid short frames into
     // orphans.
     final structuralMinimum = header.length + lengthWidth + trailer.length;
-    final minimum =
-        (rule.lengthAdjustment > structuralMinimum ? rule.lengthAdjustment : structuralMinimum)
-            .clamp(1, rule.maximumFrameBytes);
+    final minimum = (rule.lengthAdjustment > structuralMinimum
+            ? rule.lengthAdjustment
+            : structuralMinimum)
+        .clamp(1, rule.maximumFrameBytes);
     _append(bytes, timestamp);
     final output = <FramedReceiveData>[];
     while (pendingByteCount > 0) {

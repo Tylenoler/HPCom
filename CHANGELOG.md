@@ -7,13 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-21
+
 ### Added
 
 - Apache-2.0 license (`LICENSE`).
+- Continuous integration now builds the Windows release package (`flutter build windows`) instead of stopping after analysis and tests.
+
+### Changed
+
+- Repository links, the in-app About entry and the product documents follow the repository rename to `HPCom`.
 
 ### Fixed
 
-- Updated repository links and the in-app About entry to the renamed `HPCom` repository.
 - Template-length framing keeps a declared zero-payload frame (`AA 55 00 57 0D`) in one piece instead of releasing it as orphan bytes; the minimum-length guard no longer double-counts the fixed header, length, checksum and trailer fields.
 - The custom baud rate prompt is no longer 28 px shorter than its content, which clipped the helper text and raised a `RenderFlex` overflow.
 - The widget suite seeds an in-memory `SharedPreferences` store, so `flutter test` no longer stalls on an unanswered platform read until the 10-minute test timeout.
@@ -77,7 +83,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Windows UART/COM workbench, connection workflow, send queue, receive framing, and logging.
 
-[Unreleased]: https://github.com/Tylenoler/HPCom/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Tylenoler/HPCom/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/Tylenoler/HPCom/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Tylenoler/HPCom/compare/v0.4.0...v1.0.0
 [0.4.0]: https://github.com/Tylenoler/HPCom/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/Tylenoler/HPCom/compare/v0.3.1...v0.3.2

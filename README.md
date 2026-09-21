@@ -16,7 +16,7 @@
   <a href="#build-from-source--从源码构建">Build / 构建</a>
 </p>
 
-> **Current release / 当前版本：v1.0.0**
+> **Current release / 当前版本：v1.0.1**
 >
 > HPCom is a native Windows desktop tool built with Flutter for the workbench UI and Rust for the serial transport core. HPCom 是一个原生 Windows 桌面工具：Flutter 负责工作台界面，Rust 负责串口传输核心。
 
@@ -50,17 +50,17 @@ The receive workspace can switch between HEX and text, show line numbers, and ap
 
 ## Download / 下载
 
-1. Open the [v1.0.0 release](https://github.com/Tylenoler/HPCom/releases/tag/v1.0.0).
+1. Open the [v1.0.0 release](https://github.com/Tylenoler/HPCom/releases/tag/v1.0.1).
 2. Download and extract the Windows x64 release archive.
 3. Keep every extracted file and folder together; `HPCom.exe`, `hcom-core.exe`, `data/`, and the bundled DLL files are one application package.
 4. Run `HPCom.exe`.
 
-1. 打开 [v1.0.0 发布页](https://github.com/Tylenoler/HPCom/releases/tag/v1.0.0)。
+1. 打开 [v1.0.0 发布页](https://github.com/Tylenoler/HPCom/releases/tag/v1.0.1)。
 2. 下载并解压 Windows x64 发布包。
 3. 请保持所有解压后的文件和文件夹在同一目录；`HPCom.exe`、`hcom-core.exe`、`data/` 与随附 DLL 共同组成完整程序。
 4. 运行 `HPCom.exe`。
 
-> HPCom v1.0.0 is a portable Windows x64 package; no separate installer is required. HPCom v1.0.0 为免安装 Windows x64 包，无需单独安装程序。
+> HPCom v1.0.1 is a portable Windows x64 package; no separate installer is required. HPCom v1.0.1 为免安装 Windows x64 包，无需单独安装程序。
 
 ## Quick start / 快速开始
 
@@ -93,7 +93,7 @@ Use the manual-save or real-time-save actions in the receive toolbar when a trac
 
 ### 5. Advanced monitor mode / 高级旁路监听模式
 
-The source tree contains virtual-COM relay work. A complete end-user monitor-mode package requires the HCOM VCOM virtual-COM driver (`driver/hcom-vcom/`) approved through Windows kernel signing. That signed driver package is **not included in v1.0.0**, so this release should be used with physical COM ports. 源码中包含虚拟 COM 转发相关工作。完整的用户旁路监听包需要通过 Windows 内核签名审核的 HCOM VCOM 虚拟串口驱动（源码见 `driver/hcom-vcom/`）；该签名驱动 **未包含在 v1.0.0**，因此本版请使用物理 COM 口。
+The source tree contains virtual-COM relay work. A complete end-user monitor-mode package requires the HCOM VCOM virtual-COM driver (`driver/hcom-vcom/`) approved through Windows kernel signing. That signed driver package is **not included in v1.0.1**, so this release should be used with physical COM ports. 源码中包含虚拟 COM 转发相关工作。完整的用户旁路监听包需要通过 Windows 内核签名审核的 HCOM VCOM 虚拟串口驱动（源码见 `driver/hcom-vcom/`）；该签名驱动 **未包含在 v1.0.1**，因此本版请使用物理 COM 口。
 
 ## Requirements / 系统要求
 
@@ -132,7 +132,7 @@ The portable output is created under `build\windows\x64\runner\Release\`. 发布
 
 ## Validation and release notes / 验证与发布说明
 
-For v1.0.0, the Windows Release package was rebuilt from a clean Flutter build and launched successfully. The application window reports the HPCom product name and the in-app version is `1.0.0`. v1.0.0 已从干净的 Flutter 构建重新生成 Windows Release，并成功启动；应用窗口显示 HPCom，应用内版本为 `1.0.0`。
+For v1.0.1, the Windows Release package was rebuilt from a clean Flutter build, passed the full test suite and launched successfully; the About dialog reports the in-app version `1.0.1`. v1.0.1 已从干净的 Flutter 构建重新生成 Windows Release，通过完整测试并成功启动；关于页显示应用内版本 `1.0.1`。
 
 This verification does **not** replace acceptance on every USB-UART adapter, device protocol, long-duration soak scenario, or the unavailable signed virtual-COM driver workflow. 本验证 **不等同于** 覆盖所有 USB 转串口适配器、设备协议、长时间稳定性场景，或尚未提供的签名虚拟 COM 驱动流程。
 
