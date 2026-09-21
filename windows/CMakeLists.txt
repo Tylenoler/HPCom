@@ -79,26 +79,50 @@ set(HCOM_CORE_EXECUTABLE "${CMAKE_CURRENT_SOURCE_DIR}/../core/target/release/hco
 set(HCOM_CARGO_EXECUTABLE "" CACHE FILEPATH
   "Path to the Cargo executable used to build the HCOM Rust Core")
 if(NOT HCOM_CARGO_EXECUTABLE)
-  if(EXISTS "D:/HCOM-Rust/cargo/bin/cargo.exe")
-    set(HCOM_CARGO_EXECUTABLE "D:/HCOM-Rust/cargo/bin/cargo.exe" CACHE FILEPATH
-      "Path to the Cargo executable used to build the HCOM Rust Core" FORCE)
+  # Resolution order: -DHCOM_CARGO_EXECUTABLE / cached value, then the pointer
+  # file .tooling/cargo-executable.txt that CI writes before the build (the
+  # Flutter Windows build does not forward the runner's environment to CMake),
+  # then $ENV{HCOM_CARGO_EXECUTABLE}, the known toolchain layouts, and PATH.
+  # Hard-coding D:\HCOM-Rust alone made every other machine fail the build with
+  # "Cargo was not found".
+  set(_hcom_cargo_pointer
+    "${CMAKE_CURRENT_SOURCE_DIR}/../.tooling/cargo-executable.txt")
+  if(EXISTS "${_hcom_cargo_pointer}")
+    file(STRINGS "${_hcom_cargo_pointer}" _hcom_cargo_pointer_value
+      LIMIT_COUNT 1)
+    if(EXISTS "${_hcom_cargo_pointer_value}")
+      set(HCOM_CARGO_EXECUTABLE "${_hcom_cargo_pointer_value}")
+    endif()
   endif()
 endif()
+if(NOT HCOM_CARGO_EXECUTABLE AND DEFINED ENV{HCOM_CARGO_EXECUTABLE})
+  set(HCOM_CARGO_EXECUTABLE "$ENV{HCOM_CARGO_EXECUTABLE}")
+endif()
+if(NOT HCOM_CARGO_EXECUTABLE AND EXISTS "D:/HCOM-Rust/cargo/bin/cargo.exe")
+  set(HCOM_CARGO_EXECUTABLE "D:/HCOM-Rust/cargo/bin/cargo.exe")
+endif()
 if(NOT HCOM_CARGO_EXECUTABLE)
-  # CI runners (and any machine that does not use the D:\HCOM-Rust layout)
-  # keep Cargo under CARGO_HOME or the user profile, so search every known
-  # location plus PATH before failing the build.
-  find_program(HCOM_CARGO_EXECUTABLE NAMES cargo cargo.exe
-    HINTS
-      "$ENV{CARGO_HOME}/bin"
-      "$ENV{USERPROFILE}/.cargo/bin"
-      "$ENV{HOME}/.cargo/bin"
-      "D:/HCOM-Rust/cargo/bin")
+  foreach(_hcom_cargo_candidate
+      "$ENV{CARGO_HOME}/bin/cargo.exe"
+      "$ENV{USERPROFILE}/.cargo/bin/cargo.exe"
+      "$ENV{HOME}/.cargo/bin/cargo.exe")
+    if(EXISTS "${_hcom_cargo_candidate}")
+      set(HCOM_CARGO_EXECUTABLE "${_hcom_cargo_candidate}")
+      break()
+    endif()
+  endforeach()
+endif()
+if(NOT HCOM_CARGO_EXECUTABLE)
+  find_program(HCOM_CARGO_EXECUTABLE NAMES cargo cargo.exe)
 endif()
 if(NOT HCOM_CARGO_EXECUTABLE)
   message(FATAL_ERROR
-    "Cargo was not found. Set HCOM_CARGO_EXECUTABLE or install Rust/Cargo.")
+    "Cargo was not found. Set HCOM_CARGO_EXECUTABLE, write the executable path "
+    "to .tooling/cargo-executable.txt, or install Rust/Cargo. "
+    "CARGO_HOME='$ENV{CARGO_HOME}' USERPROFILE='$ENV{USERPROFILE}' "
+    "HOME='$ENV{HOME}'")
 endif()
+message(STATUS "HPCom Rust Core will be built with: ${HCOM_CARGO_EXECUTABLE}")
 file(GLOB_RECURSE HCOM_CORE_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/../core/src/*.rs")
 add_custom_command(

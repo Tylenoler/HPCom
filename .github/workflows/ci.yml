@@ -19,6 +19,13 @@ jobs:
         run: |
           cargo fmt --manifest-path core/Cargo.toml -- --check
           cargo check --manifest-path core/Cargo.toml
+      - name: Locate Cargo for CMake
+        run: |
+          $cargo = (Get-Command cargo).Source
+          Write-Host "cargo resolved to $cargo"
+          "HCOM_CARGO_EXECUTABLE=$cargo" | Add-Content -Path $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force -Path .tooling | Out-Null
+          Set-Content -Path .tooling/cargo-executable.txt -Value $cargo -NoNewline
       - name: Verify Flutter shell
         run: |
           flutter pub get
