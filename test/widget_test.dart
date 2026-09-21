@@ -12,6 +12,12 @@ import 'package:hcom/theme/hcom_theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  // The workbench persists settings through SharedPreferences. Without an
+  // in-memory store the app's startup read is never answered, and any test
+  // that awaits SharedPreferences.getInstance() inherits that pending future
+  // and times out instead of failing fast.
+  setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
   testWidgets('renders the UART workbench and its in-stream clear action',
       (tester) async {
     await tester.pumpWidget(const HcomApp());
@@ -206,7 +212,7 @@ void main() {
       find.byKey(const ValueKey('container-transform-surface')).last,
     );
     expect(dialogSurface.width, 420);
-    expect(dialogSurface.height, 280);
+    expect(dialogSurface.height, 320);
     await tester.enterText(
         find.byKey(const ValueKey('custom-baud-rate-input')), '123456');
     await tester.tap(find.text('保存').last);
@@ -465,7 +471,7 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const HcomApp());
 
-    await tester.tap(find.text('分包 · 自动识别'));
+    await tester.tap(find.text('分包 · 模板长度字段'));
     await tester.pumpAndSettle();
     final anchor = tester.widget<MenuAnchor>(
       find.byType(MenuAnchor).first,

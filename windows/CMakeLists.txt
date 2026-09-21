@@ -85,8 +85,15 @@ if(NOT HCOM_CARGO_EXECUTABLE)
   endif()
 endif()
 if(NOT HCOM_CARGO_EXECUTABLE)
-  find_program(HCOM_CARGO_EXECUTABLE NAMES cargo
-    HINTS "D:/HCOM-Rust/cargo/bin")
+  # CI runners (and any machine that does not use the D:\HCOM-Rust layout)
+  # keep Cargo under CARGO_HOME or the user profile, so search every known
+  # location plus PATH before failing the build.
+  find_program(HCOM_CARGO_EXECUTABLE NAMES cargo cargo.exe
+    HINTS
+      "$ENV{CARGO_HOME}/bin"
+      "$ENV{USERPROFILE}/.cargo/bin"
+      "$ENV{HOME}/.cargo/bin"
+      "D:/HCOM-Rust/cargo/bin")
 endif()
 if(NOT HCOM_CARGO_EXECUTABLE)
   message(FATAL_ERROR

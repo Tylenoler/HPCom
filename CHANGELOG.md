@@ -14,6 +14,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Fixed
 
 - Updated repository links and the in-app About entry to the renamed `HPCom` repository.
+- Template-length framing keeps a declared zero-payload frame (`AA 55 00 57 0D`) in one piece instead of releasing it as orphan bytes; the minimum-length guard no longer double-counts the fixed header, length, checksum and trailer fields.
+- The custom baud rate prompt is no longer 28 px shorter than its content, which clipped the helper text and raised a `RenderFlex` overflow.
+- The widget suite seeds an in-memory `SharedPreferences` store, so `flutter test` no longer stalls on an unanswered platform read until the 10-minute test timeout.
+- The Windows build finds Cargo through `CARGO_HOME`, `%USERPROFILE%\.cargo\bin` or `PATH` when Rust is not installed in `D:\HCOM-Rust`.
 
 ## [1.0.0] - 2026-09-20
 

@@ -545,9 +545,11 @@ class _WorkbenchScreenState extends State<WorkbenchScreen>
       alignment: Alignment.center,
       builder: (context) {
         // This is a single-value prompt, so keep its transform surface to the
-        // content card instead of allowing AlertDialog to fill the route.
+        // content card instead of allowing AlertDialog to fill the route. The
+        // card needs roughly 308 px of content height: a 280 px surface clipped
+        // the helper text and threw a RenderFlex overflow.
         final dialogHeight = (MediaQuery.sizeOf(context).height - 48)
-            .clamp(236.0, 280.0)
+            .clamp(280.0, 320.0)
             .toDouble();
         return SizedBox(
           width: 420,

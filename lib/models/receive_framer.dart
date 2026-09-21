@@ -240,8 +240,19 @@ class ReceiveFramer {
     }
     final header = headerResult.bytes;
     final lengthWidth = rule.lengthBytes.clamp(1, 4);
-    final minimum = (rule.lengthOffset + lengthWidth + rule.lengthAdjustment)
-        .clamp(1, rule.maximumFrameBytes);
+    final trailerResult = tryParseHexBytes(rule.trailerHex);
+    final trailer =
+        trailerResult.isValid ? trailerResult.bytes : const <int>[];
+    // The declared value counts payload bytes, so a zero-length payload is a
+    // legitimate frame: the smallest possible frame is header + length field +
+    // trailer, and a template whose fixed fields are wider than that (checksum
+    // included) raises the floor. Deriving the floor from the adjustment
+    // double-counts those fixed fields and splits valid short frames into
+    // orphans.
+    final structuralMinimum = header.length + lengthWidth + trailer.length;
+    final minimum =
+        (rule.lengthAdjustment > structuralMinimum ? rule.lengthAdjustment : structuralMinimum)
+            .clamp(1, rule.maximumFrameBytes);
     _append(bytes, timestamp);
     final output = <FramedReceiveData>[];
     while (pendingByteCount > 0) {
@@ -277,9 +288,8 @@ class ReceiveFramer {
         }
         break;
       }
-      final trailer = tryParseHexBytes(rule.trailerHex);
-      final trailerMatches = trailer.isValid && trailer.bytes.isNotEmpty
-          ? _matchesPending(total - trailer.bytes.length, trailer.bytes)
+      final trailerMatches = trailer.isNotEmpty
+          ? _matchesPending(total - trailer.length, trailer)
           : true;
       final nextHeader = _indexOfPending(header, header.length);
       // A second header only causes resynchronisation when the claimed frame
